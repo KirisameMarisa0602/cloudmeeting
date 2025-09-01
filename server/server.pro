@@ -17,17 +17,16 @@ HEADERS += \
     src/roomhub.h \
     src/udprelay.h
 
-# 引入共享协议（此 pri 内部已经把 protocol.h/.cpp 加入 HEADERS/SOURCES）
+# 引入公共协议（唯一来源）
 COMMON_DIR = $$PWD/../common
 include($$COMMON_DIR/common.pri)
 
-isEmpty(COMMON_DIR) {
-    error("common.pri requires COMMON_DIR to be set by includer")
-}
-
-INCLUDEPATH += $$PWD/common
-HEADERS += common/protocol.h
-SOURCES += common/protocol.cpp
+# 规范构建产物与中间文件目录（保持源码目录干净）
+DESTDIR     = $$OUT_PWD/bin
+OBJECTS_DIR = $$OUT_PWD/.obj
+MOC_DIR     = $$OUT_PWD/.moc
+RCC_DIR     = $$OUT_PWD/.rcc
+UI_DIR      = $$OUT_PWD/.ui
 
 qnx: target.path = /tmp/$${TARGET}/bin
 else: unix:!android: target.path = /opt/$${TARGET}/bin
