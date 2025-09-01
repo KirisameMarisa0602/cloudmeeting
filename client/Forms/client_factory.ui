@@ -10,21 +10,6 @@
     <height>500</height>
    </rect>
   </property>
-  <property name="styleSheet">
-   <string notr="true">QTabBar::tab:selected {
-    background: #0078d7;   /* 微软蓝，也可用blue */
-    color: white;
-    border-radius: 3px;
-}
-QTabBar::tab {
-    min-width: 100px; min-height: 28px;
-    background: #eaeaea;
-    color: black;
-    border-radius: 3px;
-    padding: 6px 18px;
-    margin: 2px;
-}</string>
-  </property>
   <layout class="QVBoxLayout" name="verticalLayoutMain">
    <item>
     <widget class="QTabWidget" name="tabWidget">
@@ -114,7 +99,7 @@ QTabBar::tab {
          <item>
           <widget class="QPushButton" name="btnNewOrder">
            <property name="text">
-            <string>新建工单</string>
+            <string>发布工单</string>
            </property>
           </widget>
          </item>
