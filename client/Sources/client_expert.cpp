@@ -33,17 +33,39 @@ static QColor statusColor(const QString& s) {
     return QColor(234, 179, 8);
 }
 
+// 发送一条行分隔 JSON 请求到服务器并返回回复
+static bool sendRequest(const QJsonObject& obj, QJsonObject& reply, QString* errMsg = nullptr)
+{
+    QTcpSocket sock;
+    sock.connectToHost(QHostAddress(QString::fromLatin1(SERVER_HOST)), SERVER_PORT);
+    if (!sock.waitForConnected(3000)) { if (errMsg) *errMsg = "服务器连接失败"; return false; }
+    QByteArray line = QJsonDocument(obj).toJson(QJsonDocument::Compact) + '\n';
+    if (sock.write(line) == -1 || !sock.waitForBytesWritten(2000)) { if (errMsg) *errMsg = "请求发送失败"; return false; }
+    if (!sock.waitForReadyRead(5000)) { if (errMsg) *errMsg = "服务器无响应"; return false; }
+    QByteArray resp = sock.readAll();
+    int nl = resp.indexOf('\n');
+    if (nl >= 0) resp = resp.left(nl);
+    QJsonParseError pe{};
+    QJsonDocument rdoc = QJsonDocument::fromJson(resp, &pe);
+    if (pe.error != QJsonParseError::NoError || !rdoc.isObject()) { if (errMsg) *errMsg = "响应解析失败"; return false; }
+    reply = rdoc.object();
+    return true;
+}
+
 ClientExpert::ClientExpert(QWidget *parent) :
     QWidget(parent),
     ui(new Ui::ClientExpert)
 {
     ui->setupUi(this);
     Theme::applyExpertTheme(this);
+    applyRoleUi();
 
-    // 实时通讯容器
+    // 仅保留右侧聊天：CommWidget 内部已隐藏 MainWindow 的聊天控件
     commWidget_ = new CommWidget(this);
     ui->verticalLayoutTabRealtime->addWidget(commWidget_);
-    commWidget_->setConnectionInfo(QString::fromLatin1(SERVER_HOST), SERVER_PORT, "N/A", UserSession::expertUsername);
+
+    // 进入统一示例房间（可按工单进入时改为 order-<id>）
+    commWidget_->setConnectionInfo(QString::fromLatin1(SERVER_HOST), SERVER_PORT, "Room1", UserSession::expertUsername);
 
     // Tab 角落：左侧显示当前用户名称，右侧“更改账号”
     labUserNameCorner_ = new QLabel(QStringLiteral("用户：") + UserSession::expertUsername, ui->tabWidget);
@@ -64,203 +86,210 @@ ClientExpert::ClientExpert(QWidget *parent) :
     auto* sc = new QShortcut(QKeySequence(Qt::CTRL | Qt::Key_L), this);
     connect(sc, &QShortcut::activated, this, &ClientExpert::logoutToLogin);
 
+    // 订单表格
+    decorateOrdersTable();
+
+    // 信号
     connect(ui->tabWidget, &QTabWidget::currentChanged, this, &ClientExpert::on_tabChanged);
     connect(ui->btnAccept, &QPushButton::clicked, this, &ClientExpert::on_btnAccept_clicked);
     connect(ui->btnReject, &QPushButton::clicked, this, &ClientExpert::on_btnReject_clicked);
-    connect(ui->btnRefreshOrderStatus, &QPushButton::clicked, this, &ClientExpert::refreshOrders);
     connect(ui->btnSearchOrder, &QPushButton::clicked, this, &ClientExpert::onSearchOrder);
+    // 刷新按钮（如果 UI 中不存在则忽略）
+    if (auto btn = this->findChild<QPushButton*>("btnRefreshOrderStatus"))
+        connect(btn, &QPushButton::clicked, this, &ClientExpert::onSearchOrder);
 
-    applyRoleUi();
-    decorateOrdersTable();
-
-    ui->comboBoxStatus->clear();
-    ui->comboBoxStatus->addItems(QStringList() << "全部" << "待处理" << "已接受" << "已拒绝");
-
-    connect(ui->tableOrders, &QTableWidget::cellDoubleClicked, this, &ClientExpert::onOrderDoubleClicked);
-
+    // 初始数据
     refreshOrders();
     updateTabEnabled();
 }
 
-ClientExpert::~ClientExpert() { delete ui; }
+ClientExpert::~ClientExpert()
+{
+    delete ui;
+}
 
 void ClientExpert::applyRoleUi()
 {
-    setWindowTitle(QStringLiteral("专家端 | 智能协同云会议"));
-    if (ui->tabWidget && ui->tabWidget->count() > 0)
-        ui->tabWidget->setTabText(0, QStringLiteral("专家端 • 工单中心"));
-
-    if (ui->lineEditKeyword)
-        ui->lineEditKeyword->setPlaceholderText(QStringLiteral("按工单号/标题关键词搜索…"));
-
-    this->setStyleSheet(this->styleSheet() +
-        " QHeaderView::section { background: rgba(59,130,246,0.18); }"
-        " QTableWidget { border: 1px solid rgba(59,130,246,0.55); }"
-    );
+    // 在此可补充专家端特定样式；保持空实现也可
 }
 
 void ClientExpert::decorateOrdersTable()
 {
-    auto* tbl = ui->tableOrders;
-    tbl->setAlternatingRowColors(true);
-    tbl->setSelectionBehavior(QAbstractItemView::SelectRows);
-    tbl->setSelectionMode(QAbstractItemView::SingleSelection);
-    tbl->setEditTriggers(QAbstractItemView::NoEditTriggers);
-    tbl->verticalHeader()->setVisible(false);
-    tbl->horizontalHeader()->setStretchLastSection(true);
-    tbl->setShowGrid(true);
+    auto* t = ui->tableOrders;
+    t->clear();
+    t->setColumnCount(6);
+    t->setHorizontalHeaderLabels(QStringList() << "ID" << "标题" << "描述" << "状态" << "发布者" << "接受者");
+    t->horizontalHeader()->setStretchLastSection(true);
+    t->horizontalHeader()->setSectionResizeMode(QHeaderView::Interactive);
+    t->setSelectionBehavior(QAbstractItemView::SelectRows);
+    t->setSelectionMode(QAbstractItemView::SingleSelection);
+    t->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    connect(t, &QTableWidget::cellDoubleClicked, this, &ClientExpert::onOrderDoubleClicked);
 }
 
-void ClientExpert::setJoinedOrder(bool joined) { joinedOrder = joined; updateTabEnabled(); }
+void ClientExpert::setJoinedOrder(bool joined)
+{
+    joinedOrder = joined;
+    updateTabEnabled();
+}
 
 void ClientExpert::updateTabEnabled()
 {
-    ui->tabWidget->setTabEnabled(1, true);
-    ui->tabWidget->setTabEnabled(3, true);
+    // 当选择了一行才允许接收/拒绝
+    bool hasSelection = ui->tableOrders->currentRow() >= 0;
+    ui->btnAccept->setEnabled(hasSelection);
+    ui->btnReject->setEnabled(hasSelection);
+}
+
+static OrderInfo orderFromJson(const QJsonObject& o)
+{
+    OrderInfo od;
+    od.id = o.value("id").toInt();
+    od.title = o.value("title").toString();
+    od.desc = o.value("desc").toString();
+    od.status = o.value("status").toString();
+    od.publisher = o.value("publisher").toString();
+    od.accepter = o.value("accepter").toString();
+    return od;
 }
 
 void ClientExpert::refreshOrders()
 {
-    QTcpSocket sock;
-    sock.connectToHost(SERVER_HOST, SERVER_PORT);
-    if (!sock.waitForConnected(2000)) { QMessageBox::warning(this, "提示", "无法连接服务器"); return; }
-
-    QJsonObject req{{"action", "get_orders"}};
-    req["role"] = "expert";
-    req["username"] = UserSession::expertUsername;
-    QString keyword = ui->lineEditKeyword->text().trimmed();
-    if (!keyword.isEmpty()) req["keyword"] = keyword;
-    QString status = ui->comboBoxStatus->currentText();
-    if (status != "全部") req["status"] = status;
-
-    sock.write(QJsonDocument(req).toJson(QJsonDocument::Compact) + "\n");
-    sock.waitForReadyRead(2000);
-    QByteArray resp = sock.readAll();
-    int nl = resp.indexOf('\n'); if (nl >= 0) resp = resp.left(nl);
-    QJsonDocument doc = QJsonDocument::fromJson(resp);
-    if (!doc.isObject() || !doc.object().value("ok").toBool()) { QMessageBox::warning(this, "提示", "服务器响应异常"); return; }
-
+    QJsonObject rep;
+    QString err;
+    if (!sendRequest(QJsonObject{{"action","get_orders"}}, rep, &err)) {
+        QMessageBox::warning(this, "获取工单失败", err);
+        return;
+    }
+    if (!rep.value("ok").toBool()) {
+        QMessageBox::warning(this, "获取工单失败", rep.value("msg").toString("未知错误"));
+        return;
+    }
     orders.clear();
-    for (const QJsonValue& v : doc.object().value("orders").toArray()) {
-        QJsonObject o = v.toObject();
-        OrderInfo info{
-            o.value("id").toInt(),
-            o.value("title").toString(),
-            o.value("desc").toString(),
-            o.value("status").toString(),
-            QString(), QString()
-        };
-        info.publisher = o.value("publisher").toString();
-        if (info.publisher.isEmpty()) info.publisher = o.value("factory_user").toString();
-        info.accepter = o.value("accepter").toString();
-        if (info.accepter.isEmpty()) info.accepter = o.value("expert_user").toString();
-        orders.append(info);
-    }
+    const QJsonArray arr = rep.value("orders").toArray();
+    orders.reserve(arr.size());
+    for (const auto& v : arr) orders.push_back(orderFromJson(v.toObject()));
 
-    auto* tbl = ui->tableOrders;
-    tbl->clear();
-    tbl->setColumnCount(6);
-    tbl->setRowCount(orders.size());
-    tbl->setHorizontalHeaderLabels(QStringList() << "工单号" << "标题" << "描述" << "发布者" << "接受者" << "状态");
+    // 根据筛选状态（如果存在）过滤后填充
+    QString selStatus;
+    if (ui->comboBoxStatus) selStatus = ui->comboBoxStatus->currentText();
+    auto* t = ui->tableOrders;
+    t->setRowCount(0);
+    for (const auto& od : orders) {
+        if (!selStatus.isEmpty() && selStatus != "全部" && od.status != selStatus) continue;
 
-    for (int i = 0; i < orders.size(); ++i) {
-        const auto& od = orders[i];
-        const QColor fg = statusColor(od.status);
-        const QColor bg = QColor(fg.red(), fg.green(), fg.blue(), 26);
-        auto put = [&](int c, const QString& t){ auto* it=new QTableWidgetItem(t); it->setForeground(QBrush(fg)); it->setBackground(QBrush(bg)); tbl->setItem(i,c,it); };
-        put(0, QString::number(od.id));
-        put(1, od.title);
-        put(2, od.desc);
-        put(3, od.publisher);
-        put(4, od.accepter);
-        put(5, od.status);
+        const int r = t->rowCount();
+        t->insertRow(r);
+
+        auto idItem = new QTableWidgetItem(QString::number(od.id));
+        idItem->setData(Qt::UserRole, od.id);
+        auto titleItem = new QTableWidgetItem(od.title);
+        auto descItem = new QTableWidgetItem(od.desc);
+        auto statusItem = new QTableWidgetItem(od.status);
+        statusItem->setForeground(statusColor(od.status));
+        auto pubItem = new QTableWidgetItem(od.publisher);
+        auto accItem = new QTableWidgetItem(od.accepter);
+
+        t->setItem(r, 0, idItem);
+        t->setItem(r, 1, titleItem);
+        t->setItem(r, 2, descItem);
+        t->setItem(r, 3, statusItem);
+        t->setItem(r, 4, pubItem);
+        t->setItem(r, 5, accItem);
     }
-    tbl->resizeColumnsToContents();
-    tbl->clearSelection();
+    updateTabEnabled();
+}
+
+void ClientExpert::sendUpdateOrder(int orderId, const QString& status)
+{
+    QJsonObject rep;
+    QString err;
+    QJsonObject req{
+        {"action","update_order"},
+        {"id", orderId},
+        {"status", status},
+        {"accepter", UserSession::expertUsername}
+    };
+    if (!sendRequest(req, rep, &err)) {
+        QMessageBox::warning(this, "更新工单失败", err);
+        return;
+    }
+    if (!rep.value("ok").toBool()) {
+        QMessageBox::warning(this, "更新工单失败", rep.value("msg").toString("未知错误"));
+        return;
+    }
+    refreshOrders();
 }
 
 void ClientExpert::on_btnAccept_clicked()
 {
     int row = ui->tableOrders->currentRow();
-    if (row < 0 || row >= orders.size()) { QMessageBox::warning(this, "提示", "请选择一个工单"); return; }
-    int id = orders[row].id;
-
-    QTcpSocket sock;
-    sock.connectToHost(SERVER_HOST, SERVER_PORT);
-    if (!sock.waitForConnected(2000)) { QMessageBox::warning(this, "提示", "无法连接服务器"); return; }
-
-    QJsonObject req{{"action","update_order"}, {"id", id}, {"status","已接受"}};
-    req["expert_account"] = UserSession::expertAccount;  // 账户
-    req["accepter"]       = UserSession::expertUsername; // 用户名称
-    sock.write(QJsonDocument(req).toJson(QJsonDocument::Compact) + "\n");
-    sock.waitForReadyRead(2000);
-
-    setJoinedOrder(true);
-    commWidget_->setConnectionInfo(QString::fromLatin1(SERVER_HOST), SERVER_PORT, QString("order-%1").arg(id), UserSession::expertUsername);
-    QTimer::singleShot(150, this, [this]{ refreshOrders(); });
+    if (row < 0) { QMessageBox::information(this, "提示", "请先选择一条工单"); return; }
+    int id = ui->tableOrders->item(row, 0)->data(Qt::UserRole).toInt();
+    sendUpdateOrder(id, QStringLiteral("已接受"));
 }
 
 void ClientExpert::on_btnReject_clicked()
 {
     int row = ui->tableOrders->currentRow();
-    if (row < 0 || row >= orders.size()) { QMessageBox::warning(this, "提示", "请选择一个工单"); return; }
-    int id = orders[row].id;
-
-    QTcpSocket sock;
-    sock.connectToHost(SERVER_HOST, SERVER_PORT);
-    if (!sock.waitForConnected(2000)) { QMessageBox::warning(this, "提示", "无法连接服务器"); return; }
-
-    QJsonObject req{{"action","update_order"}, {"id", id}, {"status","已拒绝"}};
-    req["expert_account"] = UserSession::expertAccount;
-    sock.write(QJsonDocument(req).toJson(QJsonDocument::Compact) + "\n");
-    sock.waitForReadyRead(2000);
-
-    setJoinedOrder(false);
-    QTimer::singleShot(150, this, [this]{ refreshOrders(); });
+    if (row < 0) { QMessageBox::information(this, "提示", "请先选择一条工单"); return; }
+    int id = ui->tableOrders->item(row, 0)->data(Qt::UserRole).toInt();
+    sendUpdateOrder(id, QStringLiteral("已拒绝"));
 }
 
-void ClientExpert::on_tabChanged(int idx)
+void ClientExpert::on_tabChanged(int /*idx*/)
 {
-    if ((idx == 1 || idx == 3) && !joinedOrder) { QMessageBox::information(this, "提示", "暂无待处理工单"); ui->tabWidget->setCurrentIndex(0); return; }
-    if (idx == 0) refreshOrders();
+    updateTabEnabled();
 }
 
-void ClientExpert::onSearchOrder() { refreshOrders(); }
-
-void ClientExpert::onOrderDoubleClicked(int row, int)
+void ClientExpert::onSearchOrder()
 {
-    if (row < 0 || row >= orders.size()) return;
-    showOrderDetailsDialog(orders[row]);
+    // 重新拉取并根据 UI 状态进行过滤填充
+    refreshOrders();
 }
 
 void ClientExpert::showOrderDetailsDialog(const OrderInfo& od)
 {
     QDialog dlg(this);
-    dlg.setWindowTitle(QStringLiteral("工单详情（专家端）"));
-    QVBoxLayout* layout = new QVBoxLayout(&dlg);
-    auto mk = [](const QString& k, const QString& v){
-        QWidget* w = new QWidget; QHBoxLayout* h = new QHBoxLayout(w); h->setContentsMargins(0,0,0,0);
-        QLabel* lk = new QLabel("<b>" + k + "</b>"); QLabel* lv = new QLabel(v); lv->setTextInteractionFlags(Qt::TextSelectableByMouse);
-        h->addWidget(lk); h->addWidget(lv, 1); return w;
+    dlg.setWindowTitle(QString("工单详情 #%1").arg(od.id));
+    QVBoxLayout* lay = new QVBoxLayout(&dlg);
+    auto addRow = [&](const QString& k, const QString& v){
+        QHBoxLayout* hl = new QHBoxLayout;
+        QLabel* lk = new QLabel(k + "：", &dlg);
+        lk->setMinimumWidth(70);
+        QLabel* lv = new QLabel(v, &dlg);
+        lv->setTextInteractionFlags(Qt::TextSelectableByMouse);
+        hl->addWidget(lk); hl->addWidget(lv, 1);
+        lay->addLayout(hl);
     };
-    layout->addWidget(mk("工单号：", QString::number(od.id)));
-    layout->addWidget(mk("标题：", od.title));
-    layout->addWidget(mk("发布者：", od.publisher));
-    layout->addWidget(mk("接受者：", od.accepter));
-    layout->addWidget(mk("状态：", od.status));
-    QLabel* desc = new QLabel("<b>描述：</b>"); QLabel* dval = new QLabel(od.desc); dval->setWordWrap(true); dval->setTextInteractionFlags(Qt::TextSelectableByMouse);
-    layout->addWidget(desc); layout->addWidget(dval);
-    QDialogButtonBox* box = new QDialogButtonBox(QDialogButtonBox::Close);
-    connect(box, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
-    connect(box, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
-    layout->addWidget(box);
-    dlg.resize(560, 360);
+    addRow("标题", od.title);
+    addRow("状态", od.status);
+    addRow("发布者", od.publisher);
+    addRow("接受者", od.accepter.isEmpty() ? "-" : od.accepter);
+    QLabel* ldesc = new QLabel("描述：", &dlg);
+    QTextBrowser* tb = new QTextBrowser(&dlg);
+    tb->setText(od.desc);
+    lay->addWidget(ldesc);
+    lay->addWidget(tb, 1);
+    QDialogButtonBox* box = new QDialogButtonBox(QDialogButtonBox::Ok, &dlg);
+    lay->addWidget(box);
+    QObject::connect(box, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
+    dlg.resize(480, 360);
     dlg.exec();
+}
+
+void ClientExpert::onOrderDoubleClicked(int row, int /*column*/)
+{
+    if (row < 0) return;
+    int id = ui->tableOrders->item(row, 0)->data(Qt::UserRole).toInt();
+    for (const auto& od : orders) {
+        if (od.id == id) { showOrderDetailsDialog(od); break; }
+    }
 }
 
 void ClientExpert::logoutToLogin()
 {
-    UserSession::expertAccount.clear();
-    UserSession::expertUsername.clear();
-    Login* lg = new Login(); lg->show(); this->close();
+    this->hide();
+    auto* login = new Login();
+    login->show();
 }
