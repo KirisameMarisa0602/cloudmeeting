@@ -12,9 +12,9 @@
 static const char* SERVER_HOST = "127.0.0.1";
 static const quint16 SERVER_PORT = 5555;
 
-Regist::Regist(QWidget *parent) :
-    QWidget(parent),
-    ui(new Ui::Regist)
+Regist::Regist(QWidget *parent)
+    : QWidget(parent)
+    , ui(new Ui::Regist)
 {
     ui->setupUi(this);
 
@@ -22,13 +22,13 @@ Regist::Regist(QWidget *parent) :
     setAttribute(Qt::WA_DeleteOnClose);
 
     ui->btnRegister->setProperty("primary", true);
+
     ui->cbRole->clear();
     ui->cbRole->addItem("请选择身份"); // 0
     ui->cbRole->addItem("专家");        // 1
     ui->cbRole->addItem("工厂");        // 2
     ui->cbRole->setCurrentIndex(0);
 
-    // 根据身份实时预览注册界面样式（不改业务逻辑）
     auto applyPreview = [this]() {
         const int idx = ui->cbRole->currentIndex();
         if (idx == 1)       Theme::applyExpertTheme(this);
@@ -39,10 +39,9 @@ Regist::Regist(QWidget *parent) :
             this, [applyPreview](int){ applyPreview(); });
     applyPreview();
 
-    // 事件
-    connect(ui->btnRegister, &QPushButton::clicked, this, &Regist::on_btnRegister_clicked);
-    // 注意：UI 中按钮对象名是 btnBack（不是 btnBackLogin）
-    connect(ui->btnBack, &QPushButton::clicked, this, &Regist::on_btnBackLogin_clicked);
+    // 重要说明：
+    // 本类使用 on_btnRegister_clicked / on_btnBackLogin_clicked 自动连接
+    // 不要再手动 connect 这两个按钮，避免重复提交
 }
 
 Regist::~Regist()
@@ -102,6 +101,7 @@ bool Regist::sendRequest(const QJsonObject &obj, QJsonObject &reply, QString *er
 
 void Regist::on_btnRegister_clicked()
 {
+    if (submitting_) return;  // 防抖
     const QString role = selectedRole();
     const QString username = ui->leUsername->text().trimmed();
     const QString pass = ui->lePassword->text();
@@ -111,9 +111,21 @@ void Regist::on_btnRegister_clicked()
     if (username.isEmpty() || pass.isEmpty()) { QMessageBox::information(this, "提示", "请输入账号和密码"); return; }
     if (pass != confirm) { QMessageBox::information(this, "提示", "两次密码不一致"); return; }
 
-    QJsonObject rep;
-    QString err;
-    if (!sendRequest(QJsonObject{{"action","register"},{"role",role},{"username",username},{"password",pass}}, rep, &err)) {
+    submitting_ = true;
+    ui->btnRegister->setEnabled(false);
+
+    QJsonObject rep; QString err;
+    const bool ok = sendRequest(QJsonObject{
+        {"action","register"},
+        {"role",role},
+        {"username",username},
+        {"password",pass}
+    }, rep, &err);
+
+    submitting_ = false;
+    ui->btnRegister->setEnabled(true);
+
+    if (!ok) {
         QMessageBox::warning(this, "注册失败", err);
         return;
     }

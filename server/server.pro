@@ -1,18 +1,11 @@
+TEMPLATE = app
+TARGET   = cloudmeeting-server
+
 QT += core network sql
 CONFIG += console c++17
+QMAKE_CXXFLAGS += -std=c++17
+macx: CONFIG -= app_bundle
 
-TEMPLATE = app
-TARGET = cloudmeeting-server
-
-INCLUDEPATH += $$PWD/Headers
-
-HEADERS += \
-    $$PWD/Headers/db_bootstrap.h \
-    $$PWD/Headers/server_actions.h
-
+# 只编译新版主程序，避免将 server/Sources 旧代码编进来
 SOURCES += \
-    $$PWD/Sources/main.cpp \
-    $$PWD/Sources/db_bootstrap.cpp \
-    $$PWD/Sources/server_actions_example.cpp
-
-QMAKE_CXXFLAGS += -Wall
+    $$PWD/src/main.cpp

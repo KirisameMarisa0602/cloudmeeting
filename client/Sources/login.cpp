@@ -19,36 +19,33 @@
 static const char* SERVER_HOST = "127.0.0.1";
 static const quint16 SERVER_PORT = 5555;
 
-Login::Login(QWidget *parent) :
-    QWidget(parent),
-    ui(new Ui::Login)
+Login::Login(QWidget *parent)
+    : QWidget(parent)
+    , ui(new Ui::Login)
 {
     ui->setupUi(this);
 
-    // 主按钮用蓝色主题
     ui->btnLogin->setProperty("primary", true);
 
-    // 初始化角色下拉
     ui->cbRole->clear();
     ui->cbRole->addItem("请选择身份"); // 0
     ui->cbRole->addItem("专家");        // 1
     ui->cbRole->addItem("工厂");        // 2
     ui->cbRole->setCurrentIndex(0);
 
-    // 根据身份实时预览登录界面样式（不改业务逻辑）
     auto applyPreview = [this]() {
-        const int idx = ui->cbRole->currentIndex();
-        if (idx == 1)       Theme::applyExpertTheme(this);
-        else if (idx == 2)  Theme::applyFactoryTheme(this);
-        else                this->setStyleSheet(QString()); // 清空为默认
+        switch (ui->cbRole->currentIndex()) {
+        case 1: Theme::applyExpertTheme(this);  break;
+        case 2: Theme::applyFactoryTheme(this); break;
+        default: this->setStyleSheet(QString()); break;
+        }
     };
     connect(ui->cbRole, QOverload<int>::of(&QComboBox::currentIndexChanged),
             this, [applyPreview](int){ applyPreview(); });
     applyPreview();
 
-    // 信号
-    connect(ui->btnLogin, &QPushButton::clicked, this, &Login::on_btnLogin_clicked);
-    connect(ui->btnToReg, &QPushButton::clicked, this, &Login::on_btnToReg_clicked);
+    // 重要：不要再手动 connect(btnLogin/btnToReg, clicked, ...)
+    // 本类使用 on_<object>_<signal> 自动连接，避免重复触发
 }
 
 Login::~Login()
@@ -58,7 +55,6 @@ Login::~Login()
 
 void Login::closeEvent(QCloseEvent *event)
 {
-    // 让登录窗口决定何时退出
     QCoreApplication::quit();
     QWidget::closeEvent(event);
 }
@@ -90,8 +86,8 @@ bool Login::sendRequest(const QJsonObject &obj, QJsonObject &reply, QString *err
         return false;
     }
     QByteArray resp = sock.readAll();
-    int nl = resp.indexOf('\n');
-    if (nl >= 0) resp = resp.left(nl);
+    if (int nl = resp.indexOf('\n'); nl >= 0) resp = resp.left(nl);
+
     QJsonParseError pe{};
     QJsonDocument rdoc = QJsonDocument::fromJson(resp, &pe);
     if (pe.error != QJsonParseError::NoError || !rdoc.isObject()) {
@@ -111,8 +107,7 @@ void Login::on_btnLogin_clicked()
     if (role.isEmpty()) { QMessageBox::information(this, "提示", "请选择身份"); return; }
     if (username.isEmpty() || password.isEmpty()) { QMessageBox::information(this, "提示", "请输入账号和密码"); return; }
 
-    QJsonObject rep;
-    QString err;
+    QJsonObject rep; QString err;
     if (!sendRequest(QJsonObject{{"action","login"},{"role",role},{"username",username},{"password",password}}, rep, &err)) {
         QMessageBox::warning(this, "登录失败", err);
         return;
@@ -122,7 +117,6 @@ void Login::on_btnLogin_clicked()
         return;
     }
 
-    // 登录成功 -> 进入对应端
     if (role == "expert") {
         UserSession::expertUsername = username;
         if (!expertWin) expertWin = new ClientExpert;
@@ -137,25 +131,29 @@ void Login::on_btnLogin_clicked()
 
 void Login::on_btnToReg_clicked()
 {
-    // 打开注册页并隐藏本页；注册页关闭或发出返回登录信号时，再显示登录页
-    auto* reg = new Regist();
-    reg->setAttribute(Qt::WA_DeleteOnClose);
-    // 将当前选择与输入预填到注册页
+    // 防重复：若已经有注册窗口，只激活它
+    if (regWin) {
+        regWin->raise();
+        regWin->activateWindow();
+        return;
+    }
+
+    regWin = new Regist();
+    regWin->setAttribute(Qt::WA_DeleteOnClose);
+
+    // 将当前选择与用户名预填到注册页
     const QString role = selectedRole();
-    reg->preset(role, ui->leUsername->text().trimmed(), QString());
+    regWin->preset(role, ui->leUsername->text().trimmed(), QString());
 
-    connect(reg, &Regist::requestBackToLogin, this, [this, reg]{
-        if (reg) reg->close();
-        this->show();
-        this->raise();
-        this->activateWindow();
+    // 注册页返回/关闭 -> 回到登录页，并清空指针
+    connect(regWin, &Regist::requestBackToLogin, this, [this]{
+        if (regWin) regWin->close();
     });
-    connect(reg, &QObject::destroyed, this, [this]{
-        this->show();
-        this->raise();
-        this->activateWindow();
+    connect(regWin, &QObject::destroyed, this, [this]{
+        regWin = nullptr;
+        this->show(); this->raise(); this->activateWindow();
     });
 
-    reg->show();
+    regWin->show();
     this->hide();
 }

@@ -1,343 +1,362 @@
 #include <QCoreApplication>
-#include "roomhub.h"
-#include "udprelay.h"
 #include <QTcpServer>
 #include <QTcpSocket>
-#include <QSqlDatabase>
-#include <QSqlQuery>
-#include <QSqlError>
+#include <QHostAddress>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QJsonArray>
+#include <QJsonParseError>
+#include <QtSql>
+#include <QDir>
 #include <QCryptographicHash>
-#include <QDebug>
-#include <QTime>
-#include <QDateTime>
+#include <QHash>
+#include <QMultiHash>
 
-static const quint16 Port = 5555;
-static const char* DB_FILE = "users.db";
+static const quint16 DEFAULT_PORT = 5555;
 
-static QString hashPass(const QString &pass) {
-    return QString::fromLatin1(QCryptographicHash::hash(pass.toUtf8(), QCryptographicHash::Sha256).toHex());
-}
+static QByteArray toLine(const QJsonObject& o){ return QJsonDocument(o).toJson(QJsonDocument::Compact) + '\n'; }
+static void writeLine(QTcpSocket* s, const QJsonObject& o){ if (!s) return; s->write(toLine(o)); s->flush(); }
+static QJsonObject okReply(const QJsonObject& extra = {}){ QJsonObject r{{"ok",true}}; for(auto it=extra.begin(); it!=extra.end(); ++it) r[it.key()] = it.value(); return r; }
+static QJsonObject errReply(const QString& msg){ return QJsonObject{{"ok",false},{"msg",msg}}; }
+static QString dbPath(){ return QDir(QCoreApplication::applicationDirPath()).filePath("cloudmeeting.db"); }
+static QString sha256(const QString& s){ return QString(QCryptographicHash::hash(s.toUtf8(), QCryptographicHash::Sha256).toHex()); }
 
-static bool tableExists(const QString &name)
-{
-    QSqlQuery q;
-    q.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name=?");
-    q.addBindValue(name);
-    return q.exec() && q.next();
-}
+// 简单聊天室（保留原有功能）
+struct ChatHub {
+    static QHash<QTcpSocket*, QString>& userOf(){ static QHash<QTcpSocket*, QString> x; return x; }
+    static QHash<QTcpSocket*, QString>& roomOf(){ static QHash<QTcpSocket*, QString> x; return x; }
+    static QMultiHash<QString, QTcpSocket*>& sockets(){ static QMultiHash<QString, QTcpSocket*> x; return x; }
 
-static bool migrateOldUsersToNewTables()
-{
-    if (!tableExists("users")) return true;
-    QSqlQuery q;
-    if (!q.exec("CREATE TABLE IF NOT EXISTS expert_users ( username TEXT PRIMARY KEY, password TEXT NOT NULL );")) {
-        qCritical() << "Create expert_users failed:" << q.lastError().text();
-        return false;
+    static void join(QTcpSocket* s, const QString& room, const QString& user){
+        leave(s, false);
+        userOf().insert(s, user);
+        roomOf().insert(s, room);
+        sockets().insert(room, s);
+
+        QJsonObject msg{
+            {"action","chat_broadcast"},
+            {"system",true},
+            {"room",room},
+            {"from",user},
+            {"text",QStringLiteral("用户（%1）进入房间").arg(user)}
+        };
+        broadcast(room, msg);
     }
-    if (!q.exec("CREATE TABLE IF NOT EXISTS factory_users ( username TEXT PRIMARY KEY, password TEXT NOT NULL );")) {
-        qCritical() << "Create factory_users failed:" << q.lastError().text();
-        return false;
-    }
-    if (!q.exec("SELECT username, password, role FROM users")) {
-        qCritical() << "Select legacy users failed:" << q.lastError().text();
-        return false;
-    }
-    QSqlQuery qi;
-    while (q.next()) {
-        const QString u = q.value(0).toString();
-        const QString p = q.value(1).toString();
-        const QString r = q.value(2).toString();
-        if (r == "expert") {
-            qi.prepare("INSERT OR IGNORE INTO expert_users(username, password) VALUES(?, ?)");
-            qi.addBindValue(u);
-            qi.addBindValue(p);
-            if (!qi.exec()) {
-                qWarning() << "Migrate expert failed:" << qi.lastError().text();
+    static void leave(QTcpSocket* s, bool notify=true){
+        const QString user = userOf().value(s);
+        const QString room = roomOf().value(s);
+        if (!room.isEmpty()) {
+            auto range = sockets().equal_range(room);
+            for (auto it = range.first; it != range.second; ) {
+                if (it.value() == s) it = sockets().erase(it);
+                else ++it;
             }
-        } else if (r == "factory") {
-            qi.prepare("INSERT OR IGNORE INTO factory_users(username, password) VALUES(?, ?)");
-            qi.addBindValue(u);
-            qi.addBindValue(p);
-            if (!qi.exec()) {
-                qWarning() << "Migrate factory failed:" << qi.lastError().text();
-            }
+        }
+        userOf().remove(s);
+        roomOf().remove(s);
+
+        if (notify && !room.isEmpty() && !user.isEmpty()){
+            QJsonObject msg{
+                {"action","chat_broadcast"},
+                {"system",true},
+                {"room",room},
+                {"from",user},
+                {"text",QStringLiteral("用户（%1）离开房间").arg(user)}
+            };
+            broadcast(room, msg);
+        }
+    }
+    static void broadcast(const QString& room, const QJsonObject& obj){
+        const QByteArray line = toLine(obj);
+        auto range = sockets().equal_range(room);
+        for (auto it = range.first; it != range.second; ++it){
+            if (QTcpSocket* s = it.value()){ s->write(line); s->flush(); }
+        }
+    }
+};
+
+static bool ensureSchema(QSqlDatabase& db, QString* err=nullptr)
+{
+    QSqlQuery q(db);
+
+    if (!q.exec("CREATE TABLE IF NOT EXISTS expert_users ("
+                " username TEXT PRIMARY KEY,"
+                " password TEXT NOT NULL)")) {
+        if (err) { *err = q.lastError().text(); }
+        return false;
+    }
+
+    if (!q.exec("CREATE TABLE IF NOT EXISTS factory_users ("
+                " username TEXT PRIMARY KEY,"
+                " password TEXT NOT NULL)")) {
+        if (err) { *err = q.lastError().text(); }
+        return false;
+    }
+
+    if (!q.exec("CREATE TABLE IF NOT EXISTS orders ("
+                " id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                " title TEXT NOT NULL,"
+                " \"desc\" TEXT NOT NULL,"
+                " status TEXT NOT NULL DEFAULT '待处理',"
+                " factory_user TEXT NOT NULL,"
+                " accepter TEXT NOT NULL DEFAULT ''"
+                ")")) {
+        if (err) { *err = q.lastError().text(); }
+        return false;
+    }
+
+    // 旧 orders 表补齐 accepter 列
+    if (!q.exec("PRAGMA table_info(orders)")) {
+        if (err) { *err = q.lastError().text(); }
+        return false;
+    }
+    bool hasAccepter = false;
+    while (q.next()) if (q.value(1).toString() == "accepter") { hasAccepter = true; break; }
+    if (!hasAccepter) {
+        QSqlQuery a(db);
+        if (!a.exec("ALTER TABLE orders ADD COLUMN accepter TEXT NOT NULL DEFAULT ''")) {
+            if (err) { *err = a.lastError().text(); }
+            return false;
         }
     }
     return true;
 }
 
-static void ensureOrdersTable()
+static bool userExists(QSqlDatabase& db, const QString& table, const QString& username)
 {
-    QSqlQuery q;
-    // 新增factory_user字段，id主键不自增
-    q.exec("CREATE TABLE IF NOT EXISTS orders ("
-           " id INTEGER PRIMARY KEY,"
-           " title TEXT,"
-           " desc TEXT,"
-           " status TEXT,"
-           " factory_user TEXT"
-           ")");
+    QSqlQuery q(db);
+    q.prepare(QString("SELECT 1 FROM %1 WHERE username=? LIMIT 1").arg(table));
+    q.addBindValue(username);
+    if (!q.exec()) return false;
+    return q.next();
 }
 
-// 生成唯一的4位工单号
-static int generateRandomOrderId() {
-    QSqlQuery q;
-    for (int i = 0; i < 100; ++i) {
-        int id = 1000 + qrand() % 9000;
-        q.prepare("SELECT 1 FROM orders WHERE id=?");
+static QJsonObject handleRegister(const QJsonObject& req, QSqlDatabase& db)
+{
+    const QString role = req.value("role").toString();
+    const QString username = req.value("username").toString().trimmed();
+    const QString password = req.value("password").toString();
+
+    if (role != "expert" && role != "factory") return errReply("invalid role");
+    if (username.isEmpty() || password.isEmpty()) return errReply("账号或密码为空");
+
+    const QString table = (role == "expert") ? "expert_users" : "factory_users";
+
+    if (userExists(db, table, username)) {
+        return errReply("用户已存在");
+    }
+
+    QSqlQuery q(db);
+    q.prepare(QString("INSERT INTO %1(username,password) VALUES(?,?)").arg(table));
+    q.addBindValue(username);
+    q.addBindValue(sha256(password));
+    if (!q.exec()) return errReply("数据库错误: " + q.lastError().text());
+
+    return okReply();
+}
+
+static QJsonObject handleLogin(const QJsonObject& req, QSqlDatabase& db)
+{
+    const QString role = req.value("role").toString();
+    const QString username = req.value("username").toString().trimmed();
+    const QString password = req.value("password").toString();
+
+    if (role != "expert" && role != "factory") return errReply("invalid role");
+    if (username.isEmpty() || password.isEmpty()) return errReply("账号或密码为空");
+
+    const QString table = (role == "expert") ? "expert_users" : "factory_users";
+
+    QSqlQuery q(db);
+    q.prepare(QString("SELECT 1 FROM %1 WHERE username=? AND password=? LIMIT 1").arg(table));
+    q.addBindValue(username);
+    q.addBindValue(sha256(password));
+    if (!q.exec()) return errReply("数据库错误: " + q.lastError().text());
+    if (!q.next()) return errReply("账号或密码不正确");
+
+    return okReply();
+}
+
+static QJsonObject handleNewOrder(const QJsonObject& req, QSqlDatabase& db)
+{
+    const QString title = req.value("title").toString().trimmed();
+    const QString desc  = req.value("desc").toString().trimmed();
+    const QString factoryUser = req.value("factory_user").toString().trimmed();
+
+    if (title.isEmpty() || desc.isEmpty() || factoryUser.isEmpty())
+        return errReply("参数不完整");
+
+    QSqlQuery q(db);
+    q.prepare("INSERT INTO orders(title, \"desc\", status, factory_user, accepter) VALUES(?, ?, '待处理', ?, '')");
+    q.addBindValue(title);
+    q.addBindValue(desc);
+    q.addBindValue(factoryUser);
+    if (!q.exec()) return errReply("数据库错误: " + q.lastError().text());
+
+    return okReply(QJsonObject{{"id", q.lastInsertId().toInt()}});
+}
+
+static QJsonObject handleGetOrders(const QJsonObject& req, QSqlDatabase& db)
+{
+    const QString role = req.value("role").toString();
+    const QString username = req.value("username").toString();
+    const QString keyword = req.value("keyword").toString();
+    const QString status  = req.value("status").toString();
+
+    QString sql = "SELECT id, title, \"desc\", status, factory_user, accepter FROM orders WHERE 1=1";
+    QList<QVariant> binds;
+
+    if (role == "factory" && !username.isEmpty()) {
+        sql += " AND factory_user=?";
+        binds << username;
+    }
+    if (!keyword.isEmpty()) {
+        sql += " AND (title LIKE ? OR \"desc\" LIKE ?)";
+        const QString like = "%" + keyword + "%";
+        binds << like << like;
+    }
+    if (!status.isEmpty() && status != QStringLiteral("全部")) {
+        sql += " AND status=?";
+        binds << status;
+    }
+    sql += " ORDER BY id DESC";
+
+    QSqlQuery q(db);
+    if (!q.prepare(sql)) return errReply("数据库错误: " + q.lastError().text());
+    for (const auto& v : binds) q.addBindValue(v);
+    if (!q.exec()) return errReply("数据库错误: " + q.lastError().text());
+
+    QJsonArray arr;
+    while (q.next()) {
+        QJsonObject o{
+            {"id", q.value(0).toInt()},
+            {"title", q.value(1).toString()},
+            {"desc", q.value(2).toString()},
+            {"status", q.value(3).toString()},
+            {"publisher", q.value(4).toString()},
+            {"accepter", q.value(5).toString()}
+        };
+        arr.push_back(o);
+    }
+    return okReply(QJsonObject{{"orders", arr}});
+}
+
+static QJsonObject handleUpdateOrder(const QJsonObject& req, QSqlDatabase& db)
+{
+    const int id = req.value("id").toInt();
+    const QString status = req.value("status").toString().trimmed();
+    const QString accepter = req.value("accepter").toString().trimmed();
+
+    if (id <= 0 || status.isEmpty()) return errReply("参数不完整");
+
+    QSqlQuery q(db);
+    if (status == QStringLiteral("已接受") && !accepter.isEmpty()) {
+        q.prepare("UPDATE orders SET status=?, accepter=? WHERE id=?");
+        q.addBindValue(status);
+        q.addBindValue(accepter);
         q.addBindValue(id);
-        q.exec();
-        if (!q.next()) return id;
+    } else {
+        q.prepare("UPDATE orders SET status=? WHERE id=?");
+        q.addBindValue(status);
+        q.addBindValue(id);
     }
-    return -1;
+    if (!q.exec()) return errReply("数据库错误: " + q.lastError().text());
+    return okReply();
 }
 
-class AuthServer : public QObject {
-    Q_OBJECT
-public:
-    explicit AuthServer(QObject *parent=nullptr) : QObject(parent) {}
+static QJsonObject handleDeleteOrder(const QJsonObject& req, QSqlDatabase& db)
+{
+    const int id = req.value("id").toInt();
+    const QString username = req.value("username").toString();
 
-    bool start() {
-        if (!initDb()) return false;
-        ensureOrdersTable();
+    if (id <= 0 || username.isEmpty()) return errReply("参数不完整");
 
-        m_server = new QTcpServer(this);
-        connect(m_server, &QTcpServer::newConnection, this, &AuthServer::onNewConnection);
-        if (!m_server->listen(QHostAddress::Any, Port)) {
-            qCritical() << "Listen failed:" << m_server->errorString();
-            return false;
-        }
-        qInfo() << "Auth/Order server listening on port" << Port;
-        return true;
+    QSqlQuery q(db);
+    q.prepare("SELECT 1 FROM orders WHERE id=? AND factory_user=?");
+    q.addBindValue(id);
+    q.addBindValue(username);
+    if (!q.exec() || !q.next()) return errReply("只能销毁自己创建的工单");
+
+    q.prepare("DELETE FROM orders WHERE id=?");
+    q.addBindValue(id);
+    if (!q.exec()) return errReply("数据库错误: " + q.lastError().text());
+    return okReply();
+}
+
+int main(int argc, char** argv)
+{
+    QCoreApplication app(argc, argv);
+
+    QSqlDatabase db = QSqlDatabase::addDatabase("QSQLITE");
+    db.setDatabaseName(dbPath());
+    if (!db.open()) { qCritical() << "Open DB failed:" << db.lastError().text(); return 1; }
+    { QString err; if (!ensureSchema(db, &err)) { qCritical() << "Ensure schema failed:" << err; return 2; } }
+
+    quint16 port = DEFAULT_PORT;
+    if (app.arguments().size() >= 2) {
+        bool ok=false; int p = app.arguments().at(1).toInt(&ok);
+        if (ok && p>0 && p<65536) port = static_cast<quint16>(p);
     }
 
-private slots:
-    void onNewConnection() {
-        while (m_server->hasPendingConnections()) {
-            QTcpSocket *sock = m_server->nextPendingConnection();
-            connect(sock, &QTcpSocket::readyRead, this, [this, sock](){
+    QTcpServer server;
+    QObject::connect(&server, &QTcpServer::newConnection, &server, [&]{
+        while (QTcpSocket* sock = server.nextPendingConnection()) {
+            sock->setTextModeEnabled(true);
+
+            QObject::connect(sock, &QTcpSocket::readyRead, &server, [sock, &db]{
                 while (sock->canReadLine()) {
-                    QByteArray line = sock->readLine().trimmed();
+                    const QByteArray line = sock->readLine().trimmed();
                     if (line.isEmpty()) continue;
+
                     QJsonParseError pe{};
-                    QJsonDocument doc = QJsonDocument::fromJson(line, &pe);
-                    QJsonObject reply;
+                    const QJsonDocument doc = QJsonDocument::fromJson(line, &pe);
+                    QJsonObject resp;
+
                     if (pe.error != QJsonParseError::NoError || !doc.isObject()) {
-                        reply = makeReply(false, "bad json");
+                        resp = errReply("invalid json");
                     } else {
-                        reply = handle(doc.object());
+                        const QJsonObject req = doc.object();
+                        const QString action = req.value("action").toString();
+
+                        if (action == "chat_join") {
+                            const QString room = req.value("room").toString().trimmed();
+                            const QString user = req.value("username").toString().trimmed();
+                            if (room.isEmpty() || user.isEmpty()) resp = errReply("参数不完整");
+                            else { ChatHub::join(sock, room, user); resp = okReply(QJsonObject{{"action","chat_join"}}); }
+                        } else if (action == "chat_msg") {
+                            const QString room = req.value("room").toString().trimmed();
+                            const QString from = req.value("from").toString().trimmed();
+                            const QString text = req.value("text").toString();
+                            if (room.isEmpty() || from.isEmpty() || text.isEmpty()) resp = errReply("参数不完整");
+                            else { ChatHub::broadcast(room, QJsonObject{{"action","chat_broadcast"},{"system",false},{"room",room},{"from",from},{"text",text}}); resp = okReply(QJsonObject{{"action","chat_msg"}}); }
+                        } else if (action == "chat_leave") {
+                            ChatHub::leave(sock, true); resp = okReply(QJsonObject{{"action","chat_leave"}});
+                        }
+
+                        else if (action == "register")       resp = handleRegister(req, db);
+                        else if (action == "login")          resp = handleLogin(req, db);
+                        else if (action == "new_order")      resp = handleNewOrder(req, db);
+                        else if (action == "get_orders")     resp = handleGetOrders(req, db);
+                        else if (action == "update_order")   resp = handleUpdateOrder(req, db);
+                        else if (action == "delete_order")   resp = handleDeleteOrder(req, db);
+                        else                                 resp = errReply("unknown action");
                     }
-                    QByteArray out = QJsonDocument(reply).toJson(QJsonDocument::Compact) + "\n";
-                    sock->write(out);
-                    sock->flush();
+
+                    writeLine(sock, resp);
                 }
             });
-            connect(sock, &QTcpSocket::disconnected, sock, &QTcpSocket::deleteLater);
+
+            QObject::connect(sock, &QTcpSocket::disconnected, &server, [sock]{
+                ChatHub::leave(sock, true);
+                sock->deleteLater();
+            });
         }
+    });
+
+    if (!server.listen(QHostAddress::Any, port)) {
+        qCritical() << "Listen failed on port" << port << ":" << server.errorString();
+        return 3;
     }
-
-private:
-    bool initDb() {
-        QSqlDatabase db = QSqlDatabase::addDatabase("QSQLITE");
-        db.setDatabaseName(DB_FILE);
-        if (!db.open()) {
-            qCritical() << "Open DB failed:" << db.lastError().text();
-            return false;
-        }
-        QSqlQuery q;
-        if (!q.exec("CREATE TABLE IF NOT EXISTS expert_users ( username TEXT PRIMARY KEY, password TEXT NOT NULL );")) {
-            qCritical() << "Create expert_users failed:" << q.lastError().text();
-            return false;
-        }
-        if (!q.exec("CREATE TABLE IF NOT EXISTS factory_users ( username TEXT PRIMARY KEY, password TEXT NOT NULL );")) {
-            qCritical() << "Create factory_users failed:" << q.lastError().text();
-            return false;
-        }
-        if (!migrateOldUsersToNewTables()) {
-            qWarning() << "Legacy users migration failed.";
-        }
-        return true;
-    }
-
-    bool existsInAny(const QString &username) {
-        QSqlQuery q;
-        q.prepare("SELECT 1 FROM expert_users WHERE username=? "
-                  "UNION ALL SELECT 1 FROM factory_users WHERE username=? LIMIT 1");
-        q.addBindValue(username);
-        q.addBindValue(username);
-        if (!q.exec()) return false;
-        return q.next();
-    }
-
-    QJsonObject handle(const QJsonObject &req) {
-        const QString action = req.value("action").toString();
-        if (action == "register" || action == "login") {
-            const QString role = req.value("role").toString();
-            const QString username = req.value("username").toString().trimmed();
-            const QString password = req.value("password").toString();
-
-            if (role != "expert" && role != "factory") {
-                return makeReply(false, "invalid role");
-            }
-            if (username.isEmpty() || password.isEmpty()) {
-                return makeReply(false, "账号或密码为空");
-            }
-
-            if (action == "register") {
-                return doRegister(username, role, password);
-            } else if (action == "login") {
-                return doLogin(username, role, password);
-            } else {
-                return makeReply(false, "unknown action");
-            }
-        }
-        if (action == "new_order") {
-            QString title = req.value("title").toString();
-            QString desc = req.value("desc").toString();
-            QString factory_user = req.value("factory_user").toString();
-            int id = generateRandomOrderId();
-            if (id < 0) return makeReply(false, "无法分配工单号");
-            QSqlQuery q;
-            q.prepare("INSERT INTO orders (id, title, desc, status, factory_user) VALUES (?, ?, ?, ?, ?)");
-            q.addBindValue(id);
-            q.addBindValue(title);
-            q.addBindValue(desc);
-            q.addBindValue("待处理");
-            q.addBindValue(factory_user);
-            if (q.exec()) return makeReply(true, "ok");
-            else return makeReply(false, q.lastError().text());
-        } else if (action == "get_orders") {
-            QString role = req.value("role").toString();
-            QString username = req.value("username").toString();
-            QString keyword = req.value("keyword").toString();
-            QString status = req.value("status").toString();
-            QString sql = "SELECT id, title, desc, status, factory_user FROM orders WHERE 1=1";
-            if (role == "factory" && !username.isEmpty()) {
-                sql += " AND factory_user=?";
-            }
-            if (!keyword.isEmpty()) {
-                sql += " AND (title LIKE ? OR desc LIKE ?)";
-            }
-            if (!status.isEmpty() && status != "全部") {
-                sql += " AND status=?";
-            }
-            QSqlQuery q;
-            q.prepare(sql);
-            if (role == "factory" && !username.isEmpty()) q.addBindValue(username);
-            if (!keyword.isEmpty()) {
-                QString like = "%" + keyword + "%";
-                q.addBindValue(like);
-                q.addBindValue(like);
-            }
-            if (!status.isEmpty() && status != "全部") {
-                q.addBindValue(status);
-            }
-            q.exec();
-            QJsonArray arr;
-            while (q.next()) {
-                QJsonObject o;
-                o["id"] = q.value(0).toInt();
-                o["title"] = q.value(1).toString();
-                o["desc"] = q.value(2).toString();
-                o["status"] = q.value(3).toString();
-                o["factory_user"] = q.value(4).toString();
-                arr.append(o);
-            }
-            QJsonObject rep;
-            rep["ok"] = true;
-            rep["orders"] = arr;
-            return rep;
-        } else if (action == "update_order") {
-            int id = req.value("id").toInt();
-            QString status = req.value("status").toString();
-            QSqlQuery q;
-            q.prepare("UPDATE orders SET status=? WHERE id=?");
-            q.addBindValue(status);
-            q.addBindValue(id);
-            if (q.exec()) return makeReply(true, "ok");
-            else return makeReply(false, q.lastError().text());
-        } else if (action == "delete_order") {
-            int id = req.value("id").toInt();
-            QString username = req.value("username").toString();
-            QSqlQuery q;
-            q.prepare("SELECT 1 FROM orders WHERE id=? AND factory_user=?");
-            q.addBindValue(id);
-            q.addBindValue(username);
-            if (!q.exec() || !q.next()) {
-                return makeReply(false, "只能销毁自己创建的工单");
-            }
-            q.prepare("DELETE FROM orders WHERE id=?");
-            q.addBindValue(id);
-            if (q.exec()) return makeReply(true, "ok");
-            else return makeReply(false, q.lastError().text());
-        }
-        return makeReply(false, "unknown action");
-    }
-
-    QJsonObject doRegister(const QString &user, const QString &role, const QString &pass) {
-        if (existsInAny(user)) {
-            return makeReply(false, "用户已存在");
-        }
-        QSqlQuery q;
-        if (role == "expert") {
-            q.prepare("INSERT INTO expert_users(username, password) VALUES(?, ?)");
-        } else {
-            q.prepare("INSERT INTO factory_users(username, password) VALUES(?, ?)");
-        }
-        q.addBindValue(user);
-        q.addBindValue(hashPass(pass));
-        if (!q.exec()) {
-            qWarning() << "Insert failed:" << q.lastError().text();
-            return makeReply(false, "数据库错误");
-        }
-        return makeReply(true, "ok");
-    }
-
-    QJsonObject doLogin(const QString &user, const QString &role, const QString &pass) {
-        QSqlQuery q;
-        if (role == "expert") {
-            q.prepare("SELECT 1 FROM expert_users WHERE username=? AND password=? LIMIT 1");
-        } else {
-            q.prepare("SELECT 1 FROM factory_users WHERE username=? AND password=? LIMIT 1");
-        }
-        q.addBindValue(user);
-        q.addBindValue(hashPass(pass));
-        if (!q.exec()) {
-            return makeReply(false, "数据库错误");
-        }
-        if (q.next()) return makeReply(true, "ok");
-        return makeReply(false, "账号或密码不正确");
-    }
-
-    static QJsonObject makeReply(bool ok, const QString &msg) {
-        return QJsonObject{{"ok", ok}, {"msg", msg}};
-    }
-
-private:
-    QTcpServer *m_server = nullptr;
-};
-
-#include "main.moc"
-
-
-int main(int argc, char** argv) {
-    QCoreApplication app(argc, argv);
-    const quint16 tcpPort = 9000;
-    RoomHub hub;
-    if (!hub.start(tcpPort)) return 1;
-
-    UdpRelay udp;
-    if (!udp.start(tcpPort + 1)) return 1;
-
-    QCoreApplication a(argc, argv);
-    // 初始化随机数
-    qsrand(QTime::currentTime().msec() ^ QDateTime::currentMSecsSinceEpoch());
-    AuthServer s;
-    if (!s.start()) return 1;
+    qInfo() << "Server listening on" << port << "DB:" << dbPath();
 
     return app.exec();
 }
-
