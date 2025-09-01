@@ -1,54 +1,41 @@
 #include "client_expert.h"
 #include "ui_client_expert.h"
-#include "comm/commwidget.h"
 #include "theme.h"
 #include "user_session.h"
 #include "login.h"
+#include "net_util.h"
+#include "shared_types.h"
 
-#include <QTcpSocket>
-#include <QJsonDocument>
 #include <QJsonObject>
 #include <QJsonArray>
 #include <QMessageBox>
-#include <QTimer>
-#include <QTableWidget>
-#include <QHeaderView>
-#include <QAbstractItemView>
 #include <QDialog>
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QLabel>
-#include <QDialogButtonBox>
-#include <QBrush>
-#include <QColor>
+#include <QTextBrowser>
+#include <QHeaderView>
+#include <QAbstractItemView>
 #include <QPushButton>
 #include <QShortcut>
 
-static const char* SERVER_HOST = "127.0.0.1";
-static const quint16 SERVER_PORT = 5555;
-
 static QColor statusColor(const QString& s) {
-    if (s == QStringLiteral("已接受")) return QColor(59, 130, 246);
-    if (s == QStringLiteral("已拒绝")) return QColor(220, 38, 38);
-    return QColor(234, 179, 8);
+    if (s == QStringLiteral("待处理")) return QColor("#E6A23C");
+    if (s == QStringLiteral("已接受")) return QColor("#67C23A");
+    if (s == QStringLiteral("已拒绝")) return QColor("#F56C6C");
+    return QColor("#ffffff");
 }
 
-// 简单请求助手
-static bool sendRequest(const QJsonObject& obj, QJsonObject& reply, QString* errMsg = nullptr)
+static OrderInfo orderFromJson(const QJsonObject& o)
 {
-    QTcpSocket sock;
-    sock.connectToHost(QHostAddress(QString::fromLatin1(SERVER_HOST)), SERVER_PORT);
-    if (!sock.waitForConnected(3000)) { if (errMsg) *errMsg = "服务器连接失败"; return false; }
-    QByteArray line = QJsonDocument(obj).toJson(QJsonDocument::Compact) + '\n';
-    if (sock.write(line) == -1 || !sock.waitForBytesWritten(2000)) { if (errMsg) *errMsg = "请求发送失败"; return false; }
-    if (!sock.waitForReadyRead(5000)) { if (errMsg) *errMsg = "服务器无响应"; return false; }
-    QByteArray resp = sock.readAll();
-    if (int nl = resp.indexOf('\n'); nl >= 0) resp = resp.left(nl);
-    QJsonParseError pe{};
-    QJsonDocument doc = QJsonDocument::fromJson(resp, &pe);
-    if (pe.error != QJsonParseError::NoError || !doc.isObject()) { if (errMsg) *errMsg = "响应解析失败"; return false; }
-    reply = doc.object();
-    return true;
+    OrderInfo r;
+    r.id = o.value("id").toInt();
+    r.title = o.value("title").toString();
+    r.desc = o.value("desc").toString();
+    r.status = o.value("status").toString();
+    r.publisher = o.value("publisher").toString();
+    r.accepter = o.value("accepter").toString();
+    return r;
 }
 
 ClientExpert::ClientExpert(QWidget *parent) :
@@ -62,7 +49,7 @@ ClientExpert::ClientExpert(QWidget *parent) :
     // 通讯区域（右侧在线聊天）
     commWidget_ = new CommWidget(this);
     ui->verticalLayoutTabRealtime->addWidget(commWidget_);
-    commWidget_->setConnectionInfo(QString::fromLatin1(SERVER_HOST), SERVER_PORT, "Room1", UserSession::expertUsername);
+    commWidget_->setConnectionInfo(QString::fromLatin1(serverHost()), serverPort(), "Room1", UserSession::expertUsername);
 
     // 顶部角落标签与切账号按钮
     labUserNameCorner_ = new QLabel(QStringLiteral("用户：") + UserSession::expertUsername, ui->tabWidget);
@@ -115,27 +102,22 @@ void ClientExpert::setJoinedOrder(bool joined) { joinedOrder = joined; updateTab
 void ClientExpert::updateTabEnabled()
 {
     bool hasSelection = ui->tableOrders->currentRow() >= 0;
-    ui->btnAccept->setEnabled(hasSelection);
-    ui->btnReject->setEnabled(hasSelection);
-}
-
-static OrderInfo orderFromJson(const QJsonObject& o)
-{
-    OrderInfo od;
-    od.id = o.value("id").toInt();
-    od.title = o.value("title").toString();
-    od.desc = o.value("desc").toString();
-    od.status = o.value("status").toString();
-    od.publisher = o.value("publisher").toString();
-    od.accepter = o.value("accepter").toString();
-    return od;
+    QString status;
+    if (hasSelection) status = ui->tableOrders->item(ui->tableOrders->currentRow(), 3)->text();
+    const bool canAct = hasSelection && status == QStringLiteral("待处理");
+    ui->btnAccept->setEnabled(canAct);
+    ui->btnReject->setEnabled(canAct);
 }
 
 void ClientExpert::refreshOrders()
 {
     QJsonObject rep;
     QString err;
-    if (!sendRequest(QJsonObject{{"action","get_orders"}}, rep, &err)) {
+    if (!sendRequest(QJsonObject{
+        {"action","get_orders"},
+        {"status", ui->comboBoxStatus ? ui->comboBoxStatus->currentText() : QString()},
+        {"keyword", ui->lineEditKeyword ? ui->lineEditKeyword->text().trimmed() : QString()}
+    }, rep, &err)) {
         QMessageBox::warning(this, "获取工单失败", err);
         return;
     }
@@ -161,15 +143,27 @@ void ClientExpert::refreshOrders()
         auto statusItem = new QTableWidgetItem(od.status); statusItem->setForeground(statusColor(od.status));
         t->setItem(r,0,idItem); t->setItem(r,1,titleItem); t->setItem(r,2,descItem);
         t->setItem(r,3,statusItem); t->setItem(r,4,new QTableWidgetItem(od.publisher));
-        t->setItem(r,5,new QTableWidgetItem(od.accepter));
+        t->setItem(r,5,new QTableWidgetItem(od.accepter.isEmpty() ? "-" : od.accepter));
     }
+
+    // 是否存在“我已接受”的工单，用于后续权限控制
+    setJoinedOrder(hasMyAcceptedOrder());
 }
 
 void ClientExpert::sendUpdateOrder(int orderId, const QString& status)
 {
+    // 前端校验：仅“待处理”允许操作
+    for (const auto& od : orders) {
+        if (od.id == orderId && od.status != QStringLiteral("待处理")) {
+            QMessageBox::information(this, "提示", "该工单当前状态不允许操作");
+            return;
+        }
+    }
+
     QJsonObject rep;
     QString err;
-    QJsonObject req{{"action","update_order"},{"id",orderId},{"status",status},{"accepter",UserSession::expertUsername}};
+    QJsonObject req{{"action","update_order"},{"id",orderId},{"status",status}};
+    if (status == QStringLiteral("已接受")) req["accepter"] = UserSession::expertUsername;
     if (!sendRequest(req, rep, &err)) { QMessageBox::warning(this, "更新工单失败", err); return; }
     if (!rep.value("ok").toBool()) { QMessageBox::warning(this, "更新工单失败", rep.value("msg").toString("未知错误")); return; }
     refreshOrders();
@@ -191,7 +185,16 @@ void ClientExpert::on_btnReject_clicked()
     sendUpdateOrder(id, QStringLiteral("已拒绝"));
 }
 
-void ClientExpert::on_tabChanged(int) { updateTabEnabled(); }
+void ClientExpert::on_tabChanged(int idx)
+{
+    // 假设第 0 页是“工单设置”，其它页需要“我已接受的工单”上下文
+    if (idx != 0 && !joinedOrder) {
+        QMessageBox::information(this, "提示", "当前没有待处理工单或你尚未加入任何工单");
+        ui->tabWidget->setCurrentIndex(0);
+        return;
+    }
+    updateTabEnabled();
+}
 
 void ClientExpert::onSearchOrder() { refreshOrders(); }
 
@@ -225,6 +228,15 @@ void ClientExpert::onOrderDoubleClicked(int row, int)
     if (row < 0) return;
     int id = ui->tableOrders->item(row,0)->data(Qt::UserRole).toInt();
     for (const auto& od : orders) if (od.id == id) { showOrderDetailsDialog(od); break; }
+}
+
+bool ClientExpert::hasMyAcceptedOrder() const
+{
+    for (const auto& od : orders) {
+        if (od.status == QStringLiteral("已接受") && od.accepter == UserSession::expertUsername)
+            return true;
+    }
+    return false;
 }
 
 void ClientExpert::logoutToLogin()

@@ -1,6 +1,17 @@
 #pragma once
 #include <QtCore>
-#include <QtMultimedia>
+
+// Qt 5.12.8 兼容包含：优先使用 Qt5 的模块化路径
+#if __has_include(<QtMultimedia/QAudioInput>)
+  #include <QtMultimedia/QAudioInput>
+  #include <QtMultimedia/QAudioOutput>
+  #include <QtMultimedia/QAudioFormat>
+#else
+  #include <QAudioInput>
+  #include <QAudioOutput>
+  #include <QAudioFormat>
+#endif
+
 #include "clientconn.h"
 #include "protocol.h"
 
@@ -47,20 +58,22 @@ private:
     void ensureOutput();
     void onMicReadyRead();
     void mixTick();
-
     void shrinkQueueIfNeeded(QByteArray& q);
 
     ClientConn* conn_ = nullptr;
     QString roomId_;
     QString sender_;
     quint32 seq_ = 0;
+
     QAudioInput*  audioIn_  = nullptr;
     QIODevice*    inDev_    = nullptr;
     QAudioFormat  inFmt_;
     QByteArray    inBuf_;
+
     QAudioOutput* audioOut_ = nullptr;
     QIODevice*    outDev_   = nullptr;
     QAudioFormat  outFmt_;
+
     QTimer        mixTimer_;
     QHash<QString, QByteArray> rxQueues_;
     bool  enabled_       = false;

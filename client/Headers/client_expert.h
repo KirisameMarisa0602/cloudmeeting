@@ -4,20 +4,13 @@
 #include <QWidget>
 #include "comm/commwidget.h"
 #include <QVector>
+#include "shared_types.h"
 
 QT_BEGIN_NAMESPACE
 namespace Ui { class ClientExpert; }
 QT_END_NAMESPACE
 
-// 扩展工单：展示用“发布者/接受者（用户名）”
-struct OrderInfo {
-    int id;
-    QString title;
-    QString desc;
-    QString status;
-    QString publisher; // 工厂端用户名
-    QString accepter;  // 专家端用户名
-};
+class QLabel;
 
 class ClientExpert : public QWidget
 {
@@ -50,6 +43,8 @@ private:
     void decorateOrdersTable();
     void showOrderDetailsDialog(const OrderInfo& od);
     void logoutToLogin();
+
+    bool hasMyAcceptedOrder() const;
 };
 
 #endif // CLIENT_EXPERT_H

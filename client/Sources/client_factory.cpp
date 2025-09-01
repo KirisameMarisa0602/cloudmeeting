@@ -4,19 +4,19 @@
 #include "theme.h"
 #include "user_session.h"
 #include "login.h"
+#include "net_util.h"
+#include "shared_types.h"
 
-#include <QTcpSocket>
-#include <QJsonDocument>
 #include <QJsonObject>
 #include <QJsonArray>
 #include <QMessageBox>
-#include <QTimer>
 #include <QDialog>
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QLineEdit>
 #include <QTextEdit>
+#include <QTextBrowser>
 #include <QDialogButtonBox>
 #include <QTableWidget>
 #include <QHeaderView>
@@ -26,19 +26,17 @@
 #include <QPushButton>
 #include <QShortcut>
 
-static const char* SERVER_HOST = "127.0.0.1";
-static const quint16 SERVER_PORT = 5555;
-
 static QColor statusColor(const QString& s) {
-    if (s == QStringLiteral("已接受")) return QColor(34, 197, 94);
-    if (s == QStringLiteral("已拒绝")) return QColor(220, 38, 38);
-    return QColor(234, 179, 8);
+    if (s == QStringLiteral("待处理")) return QColor("#E6A23C");
+    if (s == QStringLiteral("已接受")) return QColor("#67C23A");
+    if (s == QStringLiteral("已拒绝")) return QColor("#F56C6C");
+    return QColor("#ffffff");
 }
 
 class NewOrderDialog : public QDialog {
 public:
-    QLineEdit* editTitle;
-    QTextEdit* editDesc;
+    QLineEdit* editTitle{};
+    QTextEdit* editDesc{};
     NewOrderDialog(QWidget* parent = nullptr) : QDialog(parent)
     {
         setWindowTitle("新建工单");
@@ -58,34 +56,16 @@ public:
     }
 };
 
-// 简单请求助手
-static bool sendRequest(const QJsonObject& obj, QJsonObject& reply, QString* errMsg = nullptr)
-{
-    QTcpSocket sock;
-    sock.connectToHost(QHostAddress(QString::fromLatin1(SERVER_HOST)), SERVER_PORT);
-    if (!sock.waitForConnected(3000)) { if (errMsg) *errMsg = "服务器连接失败"; return false; }
-    QByteArray line = QJsonDocument(obj).toJson(QJsonDocument::Compact) + '\n';
-    if (sock.write(line) == -1 || !sock.waitForBytesWritten(2000)) { if (errMsg) *errMsg = "请求发送失败"; return false; }
-    if (!sock.waitForReadyRead(5000)) { if (errMsg) *errMsg = "服务器无响应"; return false; }
-    QByteArray resp = sock.readAll();
-    if (int nl = resp.indexOf('\n'); nl >= 0) resp = resp.left(nl);
-    QJsonParseError pe{};
-    QJsonDocument doc = QJsonDocument::fromJson(resp, &pe);
-    if (pe.error != QJsonParseError::NoError || !doc.isObject()) { if (errMsg) *errMsg = "响应解析失败"; return false; }
-    reply = doc.object();
-    return true;
-}
-
 static OrderInfo orderFromJson(const QJsonObject& o)
 {
-    OrderInfo od;
-    od.id = o.value("id").toInt();
-    od.title = o.value("title").toString();
-    od.desc = o.value("desc").toString();
-    od.status = o.value("status").toString();
-    od.publisher = o.value("publisher").toString();
-    od.accepter = o.value("accepter").toString();
-    return od;
+    OrderInfo r;
+    r.id = o.value("id").toInt();
+    r.title = o.value("title").toString();
+    r.desc = o.value("desc").toString();
+    r.status = o.value("status").toString();
+    r.publisher = o.value("publisher").toString();
+    r.accepter = o.value("accepter").toString();
+    return r;
 }
 
 ClientFactory::ClientFactory(QWidget *parent) :
@@ -99,7 +79,7 @@ ClientFactory::ClientFactory(QWidget *parent) :
     // 通讯区域（右侧在线聊天）
     commWidget_ = new CommWidget(this);
     ui->verticalLayoutTabRealtime->addWidget(commWidget_);
-    commWidget_->setConnectionInfo(QString::fromLatin1(SERVER_HOST), SERVER_PORT, "Room1", UserSession::factoryUsername);
+    commWidget_->setConnectionInfo(QString::fromLatin1(serverHost()), serverPort(), "Room1", UserSession::factoryUsername);
 
     // 顶部角落标签与切账号按钮
     labUserNameCorner_ = new QLabel(QStringLiteral("用户：") + UserSession::factoryUsername, ui->tabWidget);
@@ -118,7 +98,8 @@ ClientFactory::ClientFactory(QWidget *parent) :
 
     decorateOrdersTable();
 
-    connect(ui->btnNewOrder,    &QPushButton::clicked, this, &ClientFactory::on_btnNewOrder_clicked);
+    // 显式连接，彻底避免 on_btnNewOrder_clicked 的双连
+    connect(ui->btnNewOrder,    &QPushButton::clicked, this, &ClientFactory::handleNewOrderClicked);
     connect(ui->btnDeleteOrder, &QPushButton::clicked, this, &ClientFactory::on_btnDeleteOrder_clicked);
     connect(ui->tabWidget,      &QTabWidget::currentChanged, this, &ClientFactory::on_tabChanged);
     connect(ui->btnSearchOrder, &QPushButton::clicked, this, &ClientFactory::onSearchOrder);
@@ -150,7 +131,13 @@ void ClientFactory::decorateOrdersTable()
 void ClientFactory::refreshOrders()
 {
     QJsonObject rep; QString err;
-    if (!sendRequest(QJsonObject{{"action","get_orders"}}, rep, &err)) {
+    if (!sendRequest(QJsonObject{
+        {"action","get_orders"},
+        {"role","factory"},
+        {"username", UserSession::factoryUsername},
+        {"status", ui->comboBoxStatus ? ui->comboBoxStatus->currentText() : QString()},
+        {"keyword", ui->lineEditKeyword ? ui->lineEditKeyword->text().trimmed() : QString()}
+    }, rep, &err)) {
         QMessageBox::warning(this, "获取工单失败", err); return;
     }
     if (!rep.value("ok").toBool()) {
@@ -161,21 +148,17 @@ void ClientFactory::refreshOrders()
     const QJsonArray arr = rep.value("orders").toArray();
     for (const auto& v : arr) orders.push_back(orderFromJson(v.toObject()));
 
-    QString selStatus; if (ui->comboBoxStatus) selStatus = ui->comboBoxStatus->currentText();
-
     auto* t = ui->tableOrders;
     t->setRowCount(0);
     for (const auto& od : orders) {
-        if (!selStatus.isEmpty() && selStatus != "全部" && od.status != selStatus) continue;
         int r = t->rowCount(); t->insertRow(r);
         auto idItem = new QTableWidgetItem(QString::number(od.id)); idItem->setData(Qt::UserRole, od.id);
-        t->setItem(r,0,idItem);
-        t->setItem(r,1,new QTableWidgetItem(od.title));
-        t->setItem(r,2,new QTableWidgetItem(od.desc));
+        auto titleItem = new QTableWidgetItem(od.title);
+        auto descItem = new QTableWidgetItem(od.desc);
         auto statusItem = new QTableWidgetItem(od.status); statusItem->setForeground(statusColor(od.status));
-        t->setItem(r,3,statusItem);
-        t->setItem(r,4,new QTableWidgetItem(od.publisher));
-        t->setItem(r,5,new QTableWidgetItem(od.accepter));
+        t->setItem(r,0,idItem); t->setItem(r,1,titleItem); t->setItem(r,2,descItem);
+        t->setItem(r,3,statusItem); t->setItem(r,4,new QTableWidgetItem(od.publisher));
+        t->setItem(r,5,new QTableWidgetItem(od.accepter.isEmpty() ? "-" : od.accepter));
     }
     updateTabEnabled();
 }
@@ -187,7 +170,7 @@ void ClientFactory::sendCreateOrder(const QString& title, const QString& desc)
         {"action","new_order"},
         {"title", title},
         {"desc",  desc},
-        {"factory_user", UserSession::factoryUsername} // 与服务器对齐
+        {"factory_user", UserSession::factoryUsername}
     };
     if (!sendRequest(req, rep, &err)) {
         QMessageBox::warning(this, "发布工单失败", err);
@@ -206,7 +189,7 @@ void ClientFactory::updateTabEnabled()
     ui->btnDeleteOrder->setEnabled(hasSelection);
 }
 
-void ClientFactory::on_btnNewOrder_clicked()
+void ClientFactory::handleNewOrderClicked()
 {
     NewOrderDialog dlg(this);
     if (dlg.exec() != QDialog::Accepted) return;

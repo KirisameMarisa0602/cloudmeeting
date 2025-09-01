@@ -4,11 +4,13 @@
 #include <QWidget>
 #include "comm/commwidget.h"
 #include <QVector>
-#include <client_expert.h>
+#include "shared_types.h"
 
 QT_BEGIN_NAMESPACE
 namespace Ui { class ClientFactory; }
 QT_END_NAMESPACE
+
+class QLabel;
 
 class ClientFactory : public QWidget
 {
@@ -18,7 +20,8 @@ public:
     ~ClientFactory();
 
 private slots:
-    void on_btnNewOrder_clicked();
+    // 使用自定义槽名并手动连接，避免 Qt 自动 on_xxx_clicked 的重复触发
+    void handleNewOrderClicked();
     void on_btnDeleteOrder_clicked();
     void on_tabChanged(int idx);
     void onSearchOrder();

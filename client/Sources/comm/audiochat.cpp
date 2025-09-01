@@ -1,4 +1,12 @@
 #include "audiochat.h"
+#include <QDateTime>
+
+// Qt 5.12.8 兼容的设备信息头
+#if __has_include(<QtMultimedia/QAudioDeviceInfo>)
+  #include <QtMultimedia/QAudioDeviceInfo>
+#else
+  #include <QAudioDeviceInfo>
+#endif
 
 static inline qint16 clamp16(int v) {
     if (v > 32767) return 32767;
@@ -166,6 +174,7 @@ void AudioChat::shrinkQueueIfNeeded(QByteArray& q) {
     }
 }
 
+// 接收并播放
 void AudioChat::onPacket(Packet p) {
     if (p.type != MSG_AUDIO_FRAME) return;
 
@@ -202,45 +211,24 @@ void AudioChat::onPacket(Packet p) {
 void AudioChat::mixTick() {
     if (!audioOut_ || !outDev_) return;
 
-    int bytesFree = audioOut_->bytesFree();
-    while (bytesFree >= kPcmBytesPerFrm) {
-        QByteArray out; out.resize(kPcmBytesPerFrm);
-        qint16* outS = reinterpret_cast<qint16*>(out.data());
-        for (int i = 0; i < kFrameSamples; ++i) outS[i] = 0;
+    // 将多个对端的 PCM 合并并应用各自增益
+    const int need = kPcmBytesPerFrm;
+    QByteArray mix; mix.resize(need);
+    qint16* md = reinterpret_cast<qint16*>(mix.data());
+    for (int i = 0; i < kFrameSamples; ++i) md[i] = 0;
 
-        // 逐路读取并按各自增益混合
-        for (auto it = rxQueues_.begin(); it != rxQueues_.end(); ++it) {
-            const QString sender = it.key();
-            const float   gain   = peerGain_.value(sender, 1.0f);
-            QByteArray&   q      = it.value();
-
-            if (q.size() >= kPcmBytesPerFrm) {
-                const qint16* inS = reinterpret_cast<const qint16*>(q.constData());
-                if (gain == 1.0f) {
-                    for (int i = 0; i < kFrameSamples; ++i) {
-                        int acc = static_cast<int>(outS[i]) + static_cast<int>(inS[i]);
-                        outS[i] = clamp16(acc);
-                    }
-                } else if (gain > 0.0f) {
-                    for (int i = 0; i < kFrameSamples; ++i) {
-                        int acc = static_cast<int>(outS[i]) + static_cast<int>(inS[i] * gain);
-                        outS[i] = clamp16(acc);
-                    }
-                } // gain==0 静音：跳过
-                q.remove(0, kPcmBytesPerFrm);
-            }
+    for (auto it = rxQueues_.begin(); it != rxQueues_.end(); ++it) {
+        QByteArray& q = it.value();
+        if (q.size() < need) continue;
+        const qint16* s = reinterpret_cast<const qint16*>(q.constData());
+        const float g = peerGain_.value(it.key(), 1.0f) * playbackGain_;
+        for (int i = 0; i < kFrameSamples; ++i) {
+            int v = md[i] + static_cast<int>(s[i] * g);
+            if (v > 32767) v = 32767; else if (v < -32768) v = -32768;
+            md[i] = static_cast<qint16>(v);
         }
-
-        // 应用整体播放增益
-        if (playbackGain_ != 1.0f) {
-            for (int i = 0; i < kFrameSamples; ++i) {
-                int v = static_cast<int>(outS[i] * playbackGain_);
-                outS[i] = clamp16(v);
-            }
-        }
-
-        qint64 w = outDev_->write(out);
-        if (w <= 0) break;
-        bytesFree -= static_cast<int>(w);
+        q.remove(0, need);
     }
+
+    outDev_->write(mix);
 }
