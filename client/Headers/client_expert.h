@@ -9,22 +9,19 @@ QT_BEGIN_NAMESPACE
 namespace Ui { class ClientExpert; }
 QT_END_NAMESPACE
 
-// 工单数据（扩展：发布者/接受者）
+// 扩展工单：展示用“发布者/接受者（用户名）”
 struct OrderInfo {
     int id;
     QString title;
     QString desc;
     QString status;
-    QString publisher; // 新增：工单发布者（工厂端用户）
-    QString accepter;  // 新增：工单接受者（专家端用户）
+    QString publisher; // 工厂端用户名
+    QString accepter;  // 专家端用户名
 };
-
-namespace Ui { class ClientExpert; }
 
 class ClientExpert : public QWidget
 {
     Q_OBJECT
-
 public:
     explicit ClientExpert(QWidget *parent = nullptr);
     ~ClientExpert();
@@ -43,17 +40,15 @@ private:
     CommWidget* commWidget_ = nullptr;
     QVector<OrderInfo> orders;
     bool joinedOrder = false;
+    QLabel* labUserNameCorner_ = nullptr;
 
     void refreshOrders();
     void updateTabEnabled();
     void sendUpdateOrder(int orderId, const QString& status);
 
-    // UI 装饰与工具
     void applyRoleUi();
     void decorateOrdersTable();
     void showOrderDetailsDialog(const OrderInfo& od);
-
-    // 返回登录
     void logoutToLogin();
 };
 
