@@ -16,9 +16,7 @@ struct OrderInfo {
     QString status;
 };
 
-namespace Ui {
-class ClientExpert;
-}
+namespace Ui { class ClientExpert; }
 
 class ClientExpert : public QWidget
 {
@@ -35,7 +33,7 @@ private slots:
     void on_btnReject_clicked();
     void on_tabChanged(int idx);
     void onSearchOrder();
-    void onOrderDoubleClicked(int row, int column); // 新增：双击详情
+    void onOrderDoubleClicked(int row, int column);
 
 private:
     Ui::ClientExpert *ui;
@@ -47,10 +45,13 @@ private:
     void updateTabEnabled();
     void sendUpdateOrder(int orderId, const QString& status);
 
-    // 新增：UI 装饰与工具
+    // UI 装饰与工具
     void applyRoleUi();
     void decorateOrdersTable();
     void showOrderDetailsDialog(const OrderInfo& od);
+
+    // 新增：更改账号（返回登录）
+    void logoutToLogin();
 };
 
 #endif // CLIENT_EXPERT_H

@@ -1,6 +1,9 @@
 #include "client_factory.h"
 #include "ui_client_factory.h"
 #include "comm/commwidget.h"
+#include "theme.h"
+#include "login.h"
+
 #include <QTcpSocket>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -20,6 +23,8 @@
 #include <QAbstractItemView>
 #include <QBrush>
 #include <QColor>
+#include <QPushButton>
+#include <QShortcut>
 
 static const char* SERVER_HOST = "127.0.0.1";
 static const quint16 SERVER_PORT = 5555;
@@ -68,7 +73,10 @@ ClientFactory::ClientFactory(QWidget *parent) :
 {
     ui->setupUi(this);
 
-    // 实时通讯模块集成
+    // 应用工厂端绿色主题
+    Theme::applyFactoryTheme(this);
+
+    // 实时通讯模块
     commWidget_ = new CommWidget(this);
     ui->verticalLayoutTabRealtime->addWidget(commWidget_);
 
@@ -84,13 +92,34 @@ ClientFactory::ClientFactory(QWidget *parent) :
     connect(ui->btnRefreshOrderStatus, &QPushButton::clicked, this, &ClientFactory::refreshOrders);
     connect(ui->btnDeleteOrder, &QPushButton::clicked, this, &ClientFactory::on_btnDeleteOrder_clicked);
 
+    // 右上角“更改账号”按钮（挂到 TabBar 角落）
+    {
+        QPushButton* btnSwitch = new QPushButton(QStringLiteral("更改账号"), ui->tabWidget);
+        btnSwitch->setToolTip(QStringLiteral("返回登录页以更换账号（快捷键：Ctrl+L）"));
+        btnSwitch->setCursor(Qt::PointingHandCursor);
+        btnSwitch->setObjectName("btnSwitchAccount");
+        btnSwitch->setStyleSheet(
+            "QPushButton#btnSwitchAccount {"
+            "  background: rgba(34,197,94,0.22);"
+            "  border: 1px solid #22c55e; color: #e8ffee; border-radius: 6px; padding: 4px 10px;"
+            "}"
+            "QPushButton#btnSwitchAccount:hover { background: rgba(134,239,172,0.35); }"
+        );
+        ui->tabWidget->setCornerWidget(btnSwitch, Qt::TopRightCorner);
+        connect(btnSwitch, &QPushButton::clicked, this, [this]{ logoutToLogin(); });
+    }
+    // 修复：用信号连接而不是把 lambda 传给 QShortcut 构造函数
+    {
+        auto* sc = new QShortcut(QKeySequence(Qt::CTRL | Qt::Key_L), this);
+        connect(sc, &QShortcut::activated, this, &ClientFactory::logoutToLogin);
+    }
+
     // 角色化 UI 与表格装饰
     applyRoleUi();
     decorateOrdersTable();
 
     // 双击查看详情
-    connect(ui->tableOrders, &QTableWidget::cellDoubleClicked,
-            this, &ClientFactory::onOrderDoubleClicked);
+    connect(ui->tableOrders, &QTableWidget::cellDoubleClicked, this, &ClientFactory::onOrderDoubleClicked);
 
     refreshOrders();
     updateTabEnabled();
@@ -124,10 +153,9 @@ void ClientFactory::applyRoleUi()
     if (ui->btnRefreshOrderStatus) ui->btnRefreshOrderStatus->setToolTip(QStringLiteral("刷新工单列表"));
     if (ui->btnDeleteOrder) ui->btnDeleteOrder->setToolTip(QStringLiteral("销毁所选工单"));
 
-    // 表头&表格边框的轻微强化（与主题叠加）
     this->setStyleSheet(this->styleSheet() +
         " QHeaderView::section { background: rgba(34,197,94,0.18); }"
-        " QTableWidget { border: 1px solid rgba(34,197,94,0.45); }"
+        " QTableWidget { border: 1px solid rgba(34,197,94,0.55); }"
     );
 }
 
@@ -194,7 +222,7 @@ void ClientFactory::refreshOrders()
         auto* itemStatus = new QTableWidgetItem(od.status);
 
         const QColor fg = statusColor(od.status);
-        const QColor bg = QColor(fg.red(), fg.green(), fg.blue(), 26);
+        const QColor bg = QColor(fg.red(), fg.green(), fg.blue(), 24);
 
         itemId->setForeground(QBrush(fg));
         itemTitle->setForeground(QBrush(fg));
@@ -352,4 +380,12 @@ void ClientFactory::onOrderDoubleClicked(int row, int /*column*/)
     layout->addWidget(box);
     dlg.resize(520, 320);
     dlg.exec();
+}
+
+void ClientFactory::logoutToLogin()
+{
+    g_factoryUsername.clear();
+    Login* lg = new Login();
+    lg->show();
+    this->close();
 }

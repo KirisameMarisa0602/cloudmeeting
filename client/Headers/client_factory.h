@@ -10,9 +10,7 @@ QT_BEGIN_NAMESPACE
 namespace Ui { class ClientFactory; }
 QT_END_NAMESPACE
 
-namespace Ui {
-class ClientFactory;
-}
+namespace Ui { class ClientFactory; }
 
 class ClientFactory : public QWidget
 {
@@ -27,7 +25,7 @@ private slots:
     void on_btnDeleteOrder_clicked();
     void on_tabChanged(int idx);
     void onSearchOrder();
-    void onOrderDoubleClicked(int row, int column); // 新增：双击详情
+    void onOrderDoubleClicked(int row, int column);
 
 private:
     Ui::ClientFactory *ui;
@@ -40,6 +38,9 @@ private:
     // UI 装饰与工具
     void applyRoleUi();
     void decorateOrdersTable();
+
+    // 新增：更改账号（返回登录）
+    void logoutToLogin();
 
     CommWidget* commWidget_ = nullptr;
 };

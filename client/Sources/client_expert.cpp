@@ -1,6 +1,9 @@
 #include "client_expert.h"
 #include "ui_client_expert.h"
 #include "comm/commwidget.h"
+#include "theme.h"
+#include "login.h"
+
 #include <QTcpSocket>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -19,6 +22,8 @@
 #include <QDialogButtonBox>
 #include <QBrush>
 #include <QColor>
+#include <QPushButton>
+#include <QShortcut>
 
 QString g_factoryUsername;
 QString g_expertUsername;
@@ -38,10 +43,14 @@ ClientExpert::ClientExpert(QWidget *parent) :
 {
     ui->setupUi(this);
 
-    // 实时通讯模块集成
+    // 应用专家端蓝色主题
+    Theme::applyExpertTheme(this);
+
+    // 实时通讯
     commWidget_ = new CommWidget(this);
     ui->verticalLayoutTabRealtime->addWidget(commWidget_);
 
+    // Tab 切换时激活通讯
     connect(ui->tabWidget, &QTabWidget::currentChanged, this, [this](int idx){
         if (ui->tabWidget->widget(idx) == ui->tabRealtime) {
             commWidget_->mainWindow()->setFocus();
@@ -54,11 +63,34 @@ ClientExpert::ClientExpert(QWidget *parent) :
     connect(ui->btnRefreshOrderStatus, &QPushButton::clicked, this, &ClientExpert::refreshOrders);
     connect(ui->btnSearchOrder, &QPushButton::clicked, this, &ClientExpert::onSearchOrder);
 
+    // 右上角“更改账号”按钮（不改 .ui，挂到 TabBar 角落）
+    {
+        QPushButton* btnSwitch = new QPushButton(QStringLiteral("更改账号"), ui->tabWidget);
+        btnSwitch->setToolTip(QStringLiteral("返回登录页以更换账号（快捷键：Ctrl+L）"));
+        btnSwitch->setCursor(Qt::PointingHandCursor);
+        btnSwitch->setObjectName("btnSwitchAccount");
+        // 轻量蓝色按钮外观，与主题一致
+        btnSwitch->setStyleSheet(
+            "QPushButton#btnSwitchAccount {"
+            "  background: rgba(59,130,246,0.22);"
+            "  border: 1px solid #3b82f6; color: #e6f0ff; border-radius: 6px; padding: 4px 10px;"
+            "}"
+            "QPushButton#btnSwitchAccount:hover { background: rgba(147,197,253,0.35); }"
+        );
+        ui->tabWidget->setCornerWidget(btnSwitch, Qt::TopRightCorner);
+        connect(btnSwitch, &QPushButton::clicked, this, [this]{ logoutToLogin(); });
+    }
+    // 修复：用信号连接而不是把 lambda 传给 QShortcut 构造函数
+    {
+        auto* sc = new QShortcut(QKeySequence(Qt::CTRL | Qt::Key_L), this);
+        connect(sc, &QShortcut::activated, this, &ClientExpert::logoutToLogin);
+    }
+
     // 角色化 UI 与表格装饰
     applyRoleUi();
     decorateOrdersTable();
 
-    // 状态筛选（保留）
+    // 状态筛选（保持）
     ui->comboBoxStatus->clear();
     ui->comboBoxStatus->addItem("全部");
     ui->comboBoxStatus->addItem("待处理");
@@ -66,8 +98,7 @@ ClientExpert::ClientExpert(QWidget *parent) :
     ui->comboBoxStatus->addItem("已拒绝");
 
     // 双击查看详情
-    connect(ui->tableOrders, &QTableWidget::cellDoubleClicked,
-            this, &ClientExpert::onOrderDoubleClicked);
+    connect(ui->tableOrders, &QTableWidget::cellDoubleClicked, this, &ClientExpert::onOrderDoubleClicked);
 
     refreshOrders();
     updateTabEnabled();
@@ -93,12 +124,11 @@ void ClientExpert::applyRoleUi()
     if (ui->btnAccept) ui->btnAccept->setToolTip(QStringLiteral("接受所选工单并进入协作"));
     if (ui->btnReject) ui->btnReject->setToolTip(QStringLiteral("拒绝所选工单"));
     if (ui->btnRefreshOrderStatus) ui->btnRefreshOrderStatus->setToolTip(QStringLiteral("刷新工单列表"));
-    if (ui->btnSearchOrder) ui->btnSearchOrder->setToolTip(QStringLiteral("按关键词与状态筛选"));
 
-    // 表头&表格边框的轻微强化（与主题叠加）
+    // 表头&表格边框再强调一层
     this->setStyleSheet(this->styleSheet() +
         " QHeaderView::section { background: rgba(59,130,246,0.18); }"
-        " QTableWidget { border: 1px solid rgba(59,130,246,0.45); }"
+        " QTableWidget { border: 1px solid rgba(59,130,246,0.55); }"
     );
 }
 
@@ -123,7 +153,7 @@ void ClientExpert::setJoinedOrder(bool joined)
 
 void ClientExpert::updateTabEnabled()
 {
-    // 改为“始终启用”Tab，通过切换时拦截来提示更友好
+    // 导航始终可切换；未接单时切到需要权限的页会弹提示（见 on_tabChanged）
     ui->tabWidget->setTabEnabled(1, true);
     ui->tabWidget->setTabEnabled(3, true);
 }
@@ -178,7 +208,7 @@ void ClientExpert::refreshOrders()
         auto* itemStatus = new QTableWidgetItem(od.status);
 
         const QColor fg = statusColor(od.status);
-        const QColor bg = QColor(fg.red(), fg.green(), fg.blue(), 28); // 轻背景
+        const QColor bg = QColor(fg.red(), fg.green(), fg.blue(), 26); // 轻背景
 
         itemId->setForeground(QBrush(fg));
         itemTitle->setForeground(QBrush(fg));
@@ -252,7 +282,7 @@ void ClientExpert::sendUpdateOrder(int orderId, const QString& status)
 
 void ClientExpert::on_tabChanged(int idx)
 {
-    // idx==0 工单中心；1/3 为需要加入工单后才可交互的页面
+    // 未接受工单时，阻止进入需要权限的 Tab，并美化提示
     if ((idx == 1 || idx == 3) && !joinedOrder) {
         QMessageBox::information(this, "提示", "暂无待处理工单");
         ui->tabWidget->setCurrentIndex(0);
@@ -303,4 +333,13 @@ void ClientExpert::showOrderDetailsDialog(const OrderInfo& od)
     layout->addWidget(box);
     dlg.resize(520, 320);
     dlg.exec();
+}
+
+void ClientExpert::logoutToLogin()
+{
+    g_expertUsername.clear();
+    // 打开登录窗口并关闭当前窗口
+    Login* lg = new Login();
+    lg->show();
+    this->close();
 }
