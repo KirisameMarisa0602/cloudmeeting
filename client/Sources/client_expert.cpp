@@ -8,12 +8,29 @@
 #include <QMessageBox>
 #include <QTimer>
 #include <QString>
+#include <QTableWidget>
+#include <QHeaderView>
+#include <QTableWidgetItem>
+#include <QAbstractItemView>
+#include <QDialog>
+#include <QVBoxLayout>
+#include <QLabel>
+#include <QDialogButtonBox>
+#include <QBrush>
+#include <QColor>
 
+// 与工厂端共享的全局用户变量
 QString g_factoryUsername;
 QString g_expertUsername;
 
 static const char* SERVER_HOST = "127.0.0.1";
 static const quint16 SERVER_PORT = 5555;
+
+static QColor statusColor(const QString& s) {
+    if (s == QStringLiteral("已接受")) return QColor(22, 163, 74);   // green
+    if (s == QStringLiteral("已拒绝")) return QColor(220, 38, 38);   // red
+    return QColor(234, 179, 8);                                      // amber (待处理/默认)
+}
 
 ClientExpert::ClientExpert(QWidget *parent) :
     QWidget(parent),
@@ -21,7 +38,7 @@ ClientExpert::ClientExpert(QWidget *parent) :
 {
     ui->setupUi(this);
 
-    // 实时通讯模块集成（同理，可以和ClientFactory一致）
+    // 实时通讯模块集成（与现有一致）
     commWidget_ = new CommWidget(this);
     ui->verticalLayoutTabRealtime->addWidget(commWidget_);
 
@@ -32,25 +49,73 @@ ClientExpert::ClientExpert(QWidget *parent) :
     });
 
     connect(ui->tabWidget, &QTabWidget::currentChanged, this, &ClientExpert::on_tabChanged);
-      connect(ui->btnAccept, &QPushButton::clicked, this, &ClientExpert::on_btnAccept_clicked);
-      connect(ui->btnReject, &QPushButton::clicked, this, &ClientExpert::on_btnReject_clicked);
-      connect(ui->btnRefreshOrderStatus, &QPushButton::clicked, this, &ClientExpert::refreshOrders);
-      connect(ui->btnSearchOrder, &QPushButton::clicked, this, &ClientExpert::onSearchOrder);
+    connect(ui->btnAccept, &QPushButton::clicked, this, &ClientExpert::on_btnAccept_clicked);
+    connect(ui->btnReject, &QPushButton::clicked, this, &ClientExpert::on_btnReject_clicked);
+    connect(ui->btnRefreshOrderStatus, &QPushButton::clicked, this, &ClientExpert::refreshOrders);
+    connect(ui->btnSearchOrder, &QPushButton::clicked, this, &ClientExpert::onSearchOrder);
 
-      ui->comboBoxStatus->clear();
-      ui->comboBoxStatus->addItem("全部");
-      ui->comboBoxStatus->addItem("待处理");
-      ui->comboBoxStatus->addItem("已接受");
-      ui->comboBoxStatus->addItem("已拒绝");
+    // 角色化 UI 与表格装饰
+    applyRoleUi();
+    decorateOrdersTable();
 
-      refreshOrders();
-      updateTabEnabled();
+    // 状态筛选（保留现有设置）
+    ui->comboBoxStatus->clear();
+    ui->comboBoxStatus->addItem("全部");
+    ui->comboBoxStatus->addItem("待处理");
+    ui->comboBoxStatus->addItem("已接受");
+    ui->comboBoxStatus->addItem("已拒绝");
 
+    // 双击查看详情
+    connect(ui->tableOrders, &QTableWidget::cellDoubleClicked,
+            this, &ClientExpert::onOrderDoubleClicked);
+
+    refreshOrders();
+    updateTabEnabled();
 }
 
 ClientExpert::~ClientExpert()
 {
     delete ui;
+}
+
+void ClientExpert::applyRoleUi()
+{
+    setWindowTitle(QStringLiteral("专家端 | 智能协同云会议"));
+
+    // Tab 文案更贴近角色语义（不更改索引结构）
+    if (ui->tabWidget && ui->tabWidget->count() > 0) {
+        ui->tabWidget->setTabText(0, QStringLiteral("专家端 • 工单中心"));
+    }
+
+    // 搜索提示
+    if (ui->lineEditKeyword) {
+        ui->lineEditKeyword->setPlaceholderText(QStringLiteral("按工单号/标题关键词搜索…"));
+    }
+
+    // 按钮提示
+    if (ui->btnAccept) ui->btnAccept->setToolTip(QStringLiteral("接受所选工单并进入协作"));
+    if (ui->btnReject) ui->btnReject->setToolTip(QStringLiteral("拒绝所选工单"));
+    if (ui->btnRefreshOrderStatus) ui->btnRefreshOrderStatus->setToolTip(QStringLiteral("刷新工单列表"));
+    if (ui->btnSearchOrder) ui->btnSearchOrder->setToolTip(QStringLiteral("按关键词与状态筛选"));
+}
+
+void ClientExpert::decorateOrdersTable()
+{
+    auto* tbl = ui->tableOrders;
+    if (!tbl) return;
+    tbl->setAlternatingRowColors(true);
+    tbl->setSelectionBehavior(QAbstractItemView::SelectRows);
+    tbl->setSelectionMode(QAbstractItemView::SingleSelection);
+    tbl->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    tbl->verticalHeader()->setVisible(false);
+    tbl->horizontalHeader()->setStretchLastSection(true);
+    tbl->setShowGrid(true);
+
+    // 为深色主题优化的表头样式（不会影响逻辑）
+    this->setStyleSheet(this->styleSheet() +
+        " QHeaderView::section { background: rgba(255,255,255,0.06); color: #e5e7eb; border: 0; padding: 6px 8px; }"
+        " QTableWidget { gridline-color: rgba(229,231,235,0.1); }"
+    );
 }
 
 void ClientExpert::setJoinedOrder(bool joined)
@@ -109,12 +174,25 @@ void ClientExpert::refreshOrders()
     tbl->setHorizontalHeaderLabels(headers);
     for (int i = 0; i < orders.size(); ++i) {
         const auto& od = orders[i];
-        tbl->setItem(i, 0, new QTableWidgetItem(QString::number(od.id)));
-        tbl->setItem(i, 1, new QTableWidgetItem(od.title));
-        tbl->setItem(i, 2, new QTableWidgetItem(od.desc));
-        tbl->setItem(i, 3, new QTableWidgetItem(od.status));
+        auto* itemId = new QTableWidgetItem(QString::number(od.id));
+        auto* itemTitle = new QTableWidgetItem(od.title);
+        auto* itemDesc = new QTableWidgetItem(od.desc);
+        auto* itemStatus = new QTableWidgetItem(od.status);
+
+        // 状态色彩（前景色），并为整行赋予柔和色彩，便于一眼区分
+        const QColor fg = statusColor(od.status);
+        itemId->setForeground(QBrush(fg));
+        itemTitle->setForeground(QBrush(fg));
+        itemDesc->setForeground(QBrush(fg));
+        itemStatus->setForeground(QBrush(fg));
+
+        tbl->setItem(i, 0, itemId);
+        tbl->setItem(i, 1, itemTitle);
+        tbl->setItem(i, 2, itemDesc);
+        tbl->setItem(i, 3, itemStatus);
     }
     tbl->resizeColumnsToContents();
+    tbl->clearSelection();
 }
 
 void ClientExpert::on_btnAccept_clicked()
@@ -178,3 +256,41 @@ void ClientExpert::onSearchOrder()
     refreshOrders();
 }
 
+void ClientExpert::onOrderDoubleClicked(int row, int /*column*/)
+{
+    if (row < 0 || row >= orders.size()) return;
+    showOrderDetailsDialog(orders[row]);
+}
+
+void ClientExpert::showOrderDetailsDialog(const OrderInfo& od)
+{
+    QDialog dlg(this);
+    dlg.setWindowTitle(QStringLiteral("工单详情（专家端）"));
+    QVBoxLayout* layout = new QVBoxLayout(&dlg);
+    auto mk = [](const QString& k, const QString& v){
+        QWidget* w = new QWidget;
+        QHBoxLayout* h = new QHBoxLayout(w);
+        h->setContentsMargins(0,0,0,0);
+        QLabel* lk = new QLabel("<b>" + k + "</b>");
+        QLabel* lv = new QLabel(v);
+        lv->setTextInteractionFlags(Qt::TextSelectableByMouse);
+        h->addWidget(lk);
+        h->addWidget(lv, 1);
+        return w;
+    };
+    layout->addWidget(mk("工单号：", QString::number(od.id)));
+    layout->addWidget(mk("标题：", od.title));
+    layout->addWidget(mk("状态：", od.status));
+    QLabel* desc = new QLabel("<b>描述：</b>");
+    QLabel* dval = new QLabel(od.desc);
+    dval->setWordWrap(true);
+    dval->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    layout->addWidget(desc);
+    layout->addWidget(dval);
+    QDialogButtonBox* box = new QDialogButtonBox(QDialogButtonBox::Close);
+    connect(box, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+    connect(box, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
+    layout->addWidget(box);
+    dlg.resize(520, 320);
+    dlg.exec();
+}
