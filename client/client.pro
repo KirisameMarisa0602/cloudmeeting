@@ -33,7 +33,8 @@ HEADERS += \
     Headers/comm/clientconn.h \
     Headers/comm/screenshare.h \
     Headers/comm/udpmedia.h \
-    Headers/comm/volume_popup.h
+    Headers/comm/volume_popup.h \
+    Headers/theme.h
 
 SOURCES += \
     Sources/client_factory.cpp \

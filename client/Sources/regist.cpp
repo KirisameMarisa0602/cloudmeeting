@@ -8,6 +8,7 @@
 #include <QHostAddress>
 #include <QComboBox>
 #include <QLineEdit>
+#include "theme.h"
 
 static const char* SERVER_HOST = "127.0.0.1";
 static const quint16 SERVER_PORT = 5555;
@@ -23,11 +24,21 @@ Regist::Regist(QWidget *parent) :
 
     ui->btnRegister->setProperty("primary", true);
     ui->cbRole->clear();
-        ui->cbRole->addItem("请选择身份"); // 0
-        ui->cbRole->addItem("专家");        // 1
-        ui->cbRole->addItem("工厂");        // 2
-        ui->cbRole->setCurrentIndex(0);
+    ui->cbRole->addItem("请选择身份"); // 0
+    ui->cbRole->addItem("专家");        // 1
+    ui->cbRole->addItem("工厂");        // 2
+    ui->cbRole->setCurrentIndex(0);
 
+    // 根据身份实时预览注册界面样式（不改业务逻辑）
+    auto applyPreview = [this]() {
+        const int idx = ui->cbRole->currentIndex();
+        if (idx == 1)       Theme::applyExpertTheme(this);
+        else if (idx == 2)  Theme::applyFactoryTheme(this);
+        else                this->setStyleSheet(QString());
+    };
+    connect(ui->cbRole, QOverload<int>::of(&QComboBox::currentIndexChanged),
+            this, [applyPreview](int){ applyPreview(); });
+    applyPreview();
 }
 
 Regist::~Regist()
@@ -132,7 +143,7 @@ void Regist::on_btnBack_clicked()
     close(); // 关闭注册窗口，登录窗口将由外部连接恢复显示
 }
 
-// 顶层打开注册窗口：隐藏登录窗口，注册窗口关闭时恢复
+// 顶层打开注册窗口：隐藏登录窗口，注册窗口关闭时恢复（保持原有逻辑）
 void openRegistDialog(QWidget *login, const QString &prefRole,
                       const QString &prefUser, const QString &prefPass)
 {

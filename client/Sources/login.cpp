@@ -10,6 +10,9 @@
 #include <QTcpSocket>
 #include <QCloseEvent>
 #include <QCoreApplication>
+#include <QComboBox>
+#include <QLineEdit>
+#include "theme.h"
 
 static const char* SERVER_HOST = "127.0.0.1";
 static const quint16 SERVER_PORT = 5555;
@@ -22,15 +25,25 @@ Login::Login(QWidget *parent) :
     ui->setupUi(this);
 
     // 主按钮用蓝色主题
-       ui->btnLogin->setProperty("primary", true);
+    ui->btnLogin->setProperty("primary", true);
 
-       // 初始化角色下拉
-       ui->cbRole->clear();
-       ui->cbRole->addItem("请选择身份"); // 0
-       ui->cbRole->addItem("专家");        // 1
-       ui->cbRole->addItem("工厂");        // 2
-       ui->cbRole->setCurrentIndex(0);
+    // 初始化角色下拉
+    ui->cbRole->clear();
+    ui->cbRole->addItem("请选择身份"); // 0
+    ui->cbRole->addItem("专家");        // 1
+    ui->cbRole->addItem("工厂");        // 2
+    ui->cbRole->setCurrentIndex(0);
 
+    // 根据身份实时预览登录界面样式（不改业务逻辑）
+    auto applyPreview = [this]() {
+        const int idx = ui->cbRole->currentIndex();
+        if (idx == 1)       Theme::applyExpertTheme(this);
+        else if (idx == 2)  Theme::applyFactoryTheme(this);
+        else                this->setStyleSheet(QString()); // 清空为默认
+    };
+    connect(ui->cbRole, QOverload<int>::of(&QComboBox::currentIndexChanged),
+            this, [applyPreview](int){ applyPreview(); });
+    applyPreview();
 }
 
 Login::~Login()
@@ -117,9 +130,11 @@ void Login::on_btnLogin_clicked()
 
     if (role == "expert") {
         if (!expertWin) expertWin = new ClientExpert;
+        Theme::applyExpertTheme(expertWin);   // 区分专家端主题
         expertWin->show();
     } else {
         if (!factoryWin) factoryWin = new ClientFactory;
+        Theme::applyFactoryTheme(factoryWin); // 区分工厂端主题
         factoryWin->show();
     }
     this->hide();
@@ -127,7 +142,7 @@ void Login::on_btnLogin_clicked()
 
 void Login::on_btnToReg_clicked()
 {
-    // 独立顶层打开注册窗口，并隐藏当前登录窗口
+    // 独立顶层打开注册窗口，并隐藏当前登录窗口（保持原有机制）
     class Regist;
     extern void openRegistDialog(QWidget *login,
                                  const QString &prefRole,
@@ -135,4 +150,3 @@ void Login::on_btnToReg_clicked()
                                  const QString &prefPass);
     openRegistDialog(this, selectedRole(), ui->leUsername->text(), ui->lePassword->text());
 }
-
