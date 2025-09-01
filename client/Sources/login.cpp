@@ -1,8 +1,11 @@
-#include "login.h"
+#include "login.h"              // 关键：必须先包含类声明
 #include "ui_login.h"
 #include "regist.h"
 #include "client_factory.h"
 #include "client_expert.h"
+#include "user_session.h"
+#include "theme.h"
+
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QMessageBox>
@@ -12,11 +15,9 @@
 #include <QCoreApplication>
 #include <QComboBox>
 #include <QLineEdit>
-#include "theme.h"
 
 static const char* SERVER_HOST = "127.0.0.1";
 static const quint16 SERVER_PORT = 5555;
-
 
 Login::Login(QWidget *parent) :
     QWidget(parent),
@@ -44,6 +45,10 @@ Login::Login(QWidget *parent) :
     connect(ui->cbRole, QOverload<int>::of(&QComboBox::currentIndexChanged),
             this, [applyPreview](int){ applyPreview(); });
     applyPreview();
+
+    // 信号
+    connect(ui->btnLogin, &QPushButton::clicked, this, &Login::on_btnLogin_clicked);
+    connect(ui->btnToReg, &QPushButton::clicked, this, &Login::on_btnToReg_clicked);
 }
 
 Login::~Login()
@@ -99,24 +104,27 @@ bool Login::sendRequest(const QJsonObject &obj, QJsonObject &reply, QString *err
 
 void Login::on_btnLogin_clicked()
 {
-    const QString username = ui->leUsername->text().trimmed();
+    const QString role     = selectedRole();                   // "expert" | "factory"
+    const QString account  = ui->leUsername->text().trimmed(); // UI上显示为“账号”
     const QString password = ui->lePassword->text();
-    if (username.isEmpty() || password.isEmpty()) {
-        QMessageBox::warning(this, "提示", "请输入账号和密码");
+
+    if (role.isEmpty()) {
+        QMessageBox::warning(this, "登录失败", "请选择身份");
         return;
     }
-    const QString role = selectedRole();
-    if (role.isEmpty()) {
-        QMessageBox::warning(this, "提示", "请选择身份");
+    if (account.isEmpty() || password.isEmpty()) {
+        QMessageBox::warning(this, "登录失败", "请输入账号和密码");
         return;
     }
 
+    // 扩展版服务端协议：login 需要 role + account + password
     QJsonObject req{
-        {"action",  "login"},
-        {"role",    role},
-        {"username",username},
-        {"password",password}
+        {"action",   "login"},
+        {"role",     role},
+        {"account",  account},
+        {"password", password}
     };
+
     QJsonObject rep;
     QString err;
     if (!sendRequest(req, rep, &err)) {
@@ -124,29 +132,40 @@ void Login::on_btnLogin_clicked()
         return;
     }
     if (!rep.value("ok").toBool(false)) {
-        QMessageBox::warning(this, "登录失败", rep.value("msg").toString("未知错误"));
+        const QString msg = rep.value("msg").toString("未知错误");
+        QMessageBox::warning(this, "登录失败", msg);
         return;
     }
 
+    // 服务端返回 username（用于展示）
+    const QString username = rep.value("username").toString();
+
+    // 记录会话并进入对应端
     if (role == "expert") {
-        if (!expertWin) expertWin = new ClientExpert;
-        Theme::applyExpertTheme(expertWin);   // 区分专家端主题
+        UserSession::expertUsername = username;
+        if (!expertWin) expertWin = new ClientExpert();
         expertWin->show();
-    } else {
-        if (!factoryWin) factoryWin = new ClientFactory;
-        Theme::applyFactoryTheme(factoryWin); // 区分工厂端主题
+        this->hide();
+    } else { // factory
+        UserSession::factoryAccount  = account;
+        UserSession::factoryUsername = username;
+        if (!factoryWin) factoryWin = new ClientFactory();
         factoryWin->show();
+        this->hide();
     }
-    this->hide();
 }
 
 void Login::on_btnToReg_clicked()
 {
-    // 独立顶层打开注册窗口，并隐藏当前登录窗口（保持原有机制）
-    class Regist;
-    extern void openRegistDialog(QWidget *login,
-                                 const QString &prefRole,
-                                 const QString &prefUser,
-                                 const QString &prefPass);
-    openRegistDialog(this, selectedRole(), ui->leUsername->text(), ui->lePassword->text());
+    // 将当前已选择的身份/账号/密码预填到注册界面
+    QString prefRole;
+    switch (ui->cbRole->currentIndex()) {
+        case 1: prefRole = "expert"; break;
+        case 2: prefRole = "factory"; break;
+        default: prefRole.clear(); break;
+    }
+    const QString prefUser = ui->leUsername->text().trimmed();
+    const QString prefPass = ui->lePassword->text();
+
+    openRegistDialog(this, prefRole, prefUser, prefPass);
 }
