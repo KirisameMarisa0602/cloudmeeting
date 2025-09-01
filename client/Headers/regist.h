@@ -2,43 +2,36 @@
 #define REGIST_H
 
 #include <QWidget>
+#include <QJsonObject>
 
 QT_BEGIN_NAMESPACE
 namespace Ui { class Regist; }
 QT_END_NAMESPACE
 
-namespace Ui {
-class Regist;
-}
-
 class Regist : public QWidget
 {
     Q_OBJECT
-
 public:
     explicit Regist(QWidget *parent = nullptr);
     ~Regist();
 
-signals:
-    void registered(const QString &username, const QString &role);
+    // 从登录页带入默认值
+    void preset(const QString& role, const QString& user, const QString& pass);
 
-public slots:
-    void preset(const QString &role, const QString &user, const QString &pass);
+signals:
+    // 让登录页知道应该恢复显示
+    void requestBackToLogin();
 
 private slots:
     void on_btnRegister_clicked();
-    void on_btnBack_clicked();
+    void on_btnBackLogin_clicked();
 
 private:
-    bool sendRequest(const QJsonObject &obj, QJsonObject &reply, QString *errMsg = nullptr);
-    QString selectedRole() const; // "expert" | "factory" | ""
+    QString selectedRole() const; // expert | factory | ""
+    bool sendRequest(const QJsonObject& obj, QJsonObject& reply, QString* errMsg = nullptr);
 
 private:
     Ui::Regist *ui;
 };
-
-void openRegistDialog(QWidget *parent, const QString &prefRole,
-                      const QString &prefUser, const QString &prefPass);
-
 
 #endif // REGIST_H

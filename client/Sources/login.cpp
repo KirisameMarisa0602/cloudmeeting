@@ -1,4 +1,4 @@
-#include "login.h"              // 关键：必须先包含类声明
+#include "login.h"
 #include "ui_login.h"
 #include "regist.h"
 #include "client_factory.h"
@@ -104,68 +104,58 @@ bool Login::sendRequest(const QJsonObject &obj, QJsonObject &reply, QString *err
 
 void Login::on_btnLogin_clicked()
 {
-    const QString role     = selectedRole();                   // "expert" | "factory"
-    const QString account  = ui->leUsername->text().trimmed(); // UI上显示为“账号”
+    const QString role = selectedRole();
+    const QString username = ui->leUsername->text().trimmed();
     const QString password = ui->lePassword->text();
 
-    if (role.isEmpty()) {
-        QMessageBox::warning(this, "登录失败", "请选择身份");
-        return;
-    }
-    if (account.isEmpty() || password.isEmpty()) {
-        QMessageBox::warning(this, "登录失败", "请输入账号和密码");
-        return;
-    }
-
-    // 扩展版服务端协议：login 需要 role + account + password
-    QJsonObject req{
-        {"action",   "login"},
-        {"role",     role},
-        {"account",  account},
-        {"password", password}
-    };
+    if (role.isEmpty()) { QMessageBox::information(this, "提示", "请选择身份"); return; }
+    if (username.isEmpty() || password.isEmpty()) { QMessageBox::information(this, "提示", "请输入账号和密码"); return; }
 
     QJsonObject rep;
     QString err;
-    if (!sendRequest(req, rep, &err)) {
+    if (!sendRequest(QJsonObject{{"action","login"},{"role",role},{"username",username},{"password",password}}, rep, &err)) {
         QMessageBox::warning(this, "登录失败", err);
         return;
     }
-    if (!rep.value("ok").toBool(false)) {
-        const QString msg = rep.value("msg").toString("未知错误");
-        QMessageBox::warning(this, "登录失败", msg);
+    if (!rep.value("ok").toBool()) {
+        QMessageBox::warning(this, "登录失败", rep.value("msg").toString("账号或密码错误"));
         return;
     }
 
-    // 服务端返回 username（用于展示）
-    const QString username = rep.value("username").toString();
-
-    // 记录会话并进入对应端
+    // 登录成功 -> 进入对应端
     if (role == "expert") {
         UserSession::expertUsername = username;
-        if (!expertWin) expertWin = new ClientExpert();
+        if (!expertWin) expertWin = new ClientExpert;
         expertWin->show();
-        this->hide();
-    } else { // factory
-        UserSession::factoryAccount  = account;
+    } else {
         UserSession::factoryUsername = username;
-        if (!factoryWin) factoryWin = new ClientFactory();
+        if (!factoryWin) factoryWin = new ClientFactory;
         factoryWin->show();
-        this->hide();
     }
+    this->hide();
 }
 
 void Login::on_btnToReg_clicked()
 {
-    // 将当前已选择的身份/账号/密码预填到注册界面
-    QString prefRole;
-    switch (ui->cbRole->currentIndex()) {
-        case 1: prefRole = "expert"; break;
-        case 2: prefRole = "factory"; break;
-        default: prefRole.clear(); break;
-    }
-    const QString prefUser = ui->leUsername->text().trimmed();
-    const QString prefPass = ui->lePassword->text();
+    // 打开注册页并隐藏本页；注册页关闭或发出返回登录信号时，再显示登录页
+    auto* reg = new Regist();
+    reg->setAttribute(Qt::WA_DeleteOnClose);
+    // 将当前选择与输入预填到注册页
+    const QString role = selectedRole();
+    reg->preset(role, ui->leUsername->text().trimmed(), QString());
 
-    openRegistDialog(this, prefRole, prefUser, prefPass);
+    connect(reg, &Regist::requestBackToLogin, this, [this, reg]{
+        if (reg) reg->close();
+        this->show();
+        this->raise();
+        this->activateWindow();
+    });
+    connect(reg, &QObject::destroyed, this, [this]{
+        this->show();
+        this->raise();
+        this->activateWindow();
+    });
+
+    reg->show();
+    this->hide();
 }
