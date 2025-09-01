@@ -116,12 +116,15 @@ void Regist::on_btnRegister_clicked()
         return;
     }
 
+    // 扩展版服务端需要 account，这里用 username 作为 account 以避免改 UI
     QJsonObject req{
-        {"action",  "register"},
-        {"role",    role},
-        {"username",username},
-        {"password",password}
+        {"action",   "register"},
+        {"role",     role},
+        {"account",  username},  // 新增：补齐 account
+        {"username", username},
+        {"password", password}
     };
+
     QJsonObject rep;
     QString err;
     if (!sendRequest(req, rep, &err)) {
@@ -135,7 +138,7 @@ void Regist::on_btnRegister_clicked()
 
     QMessageBox::information(this, "注册成功", "账号初始化完成");
     emit registered(username, role);
-    close(); // 关闭注册窗口
+    close();
 }
 
 void Regist::on_btnBack_clicked()
