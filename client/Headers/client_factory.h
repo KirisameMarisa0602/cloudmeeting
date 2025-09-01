@@ -39,7 +39,7 @@ private:
     void applyRoleUi();
     void decorateOrdersTable();
 
-    // 新增：更改账号（返回登录）
+    // 返回登录
     void logoutToLogin();
 
     CommWidget* commWidget_ = nullptr;

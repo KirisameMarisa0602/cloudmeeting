@@ -49,6 +49,7 @@ ClientExpert::ClientExpert(QWidget *parent) :
     // 实时通讯
     commWidget_ = new CommWidget(this);
     ui->verticalLayoutTabRealtime->addWidget(commWidget_);
+    commWidget_->setConnectionInfo(QString::fromLatin1(SERVER_HOST), SERVER_PORT, "N/A", g_expertUsername);
 
     // Tab 切换时激活通讯
     connect(ui->tabWidget, &QTabWidget::currentChanged, this, [this](int idx){
@@ -69,7 +70,6 @@ ClientExpert::ClientExpert(QWidget *parent) :
         btnSwitch->setToolTip(QStringLiteral("返回登录页以更换账号（快捷键：Ctrl+L）"));
         btnSwitch->setCursor(Qt::PointingHandCursor);
         btnSwitch->setObjectName("btnSwitchAccount");
-        // 轻量蓝色按钮外观，与主题一致
         btnSwitch->setStyleSheet(
             "QPushButton#btnSwitchAccount {"
             "  background: rgba(59,130,246,0.22);"
@@ -80,7 +80,7 @@ ClientExpert::ClientExpert(QWidget *parent) :
         ui->tabWidget->setCornerWidget(btnSwitch, Qt::TopRightCorner);
         connect(btnSwitch, &QPushButton::clicked, this, [this]{ logoutToLogin(); });
     }
-    // 修复：用信号连接而不是把 lambda 传给 QShortcut 构造函数
+    // 兼容旧版 Qt：先创建，再连 activated
     {
         auto* sc = new QShortcut(QKeySequence(Qt::CTRL | Qt::Key_L), this);
         connect(sc, &QShortcut::activated, this, &ClientExpert::logoutToLogin);
@@ -125,7 +125,6 @@ void ClientExpert::applyRoleUi()
     if (ui->btnReject) ui->btnReject->setToolTip(QStringLiteral("拒绝所选工单"));
     if (ui->btnRefreshOrderStatus) ui->btnRefreshOrderStatus->setToolTip(QStringLiteral("刷新工单列表"));
 
-    // 表头&表格边框再强调一层
     this->setStyleSheet(this->styleSheet() +
         " QHeaderView::section { background: rgba(59,130,246,0.18); }"
         " QTableWidget { border: 1px solid rgba(59,130,246,0.55); }"
@@ -189,41 +188,43 @@ void ClientExpert::refreshOrders()
     QJsonArray arr = doc.object().value("orders").toArray();
     for (const QJsonValue& v : arr) {
         QJsonObject o = v.toObject();
-        orders.append(OrderInfo{
-            o.value("id").toInt(), o.value("title").toString(),
-            o.value("desc").toString(), o.value("status").toString()
-        });
+        OrderInfo info{
+            o.value("id").toInt(),
+            o.value("title").toString(),
+            o.value("desc").toString(),
+            o.value("status").toString(),
+            QString(), QString()
+        };
+        // 兼容不同键名
+        info.publisher = o.value("publisher").toString();
+        if (info.publisher.isEmpty()) info.publisher = o.value("factory_user").toString();
+        info.accepter = o.value("accepter").toString();
+        if (info.accepter.isEmpty()) info.accepter = o.value("expert_user").toString();
+        orders.append(info);
     }
     auto* tbl = ui->tableOrders;
     tbl->clear();
-    tbl->setColumnCount(4);
+    tbl->setColumnCount(6);
     tbl->setRowCount(orders.size());
-    QStringList headers{"工单号", "标题", "描述", "状态"};
+    QStringList headers{"工单号", "标题", "描述", "发布者", "接受者", "状态"};
     tbl->setHorizontalHeaderLabels(headers);
     for (int i = 0; i < orders.size(); ++i) {
         const auto& od = orders[i];
-        auto* itemId = new QTableWidgetItem(QString::number(od.id));
-        auto* itemTitle = new QTableWidgetItem(od.title);
-        auto* itemDesc = new QTableWidgetItem(od.desc);
-        auto* itemStatus = new QTableWidgetItem(od.status);
-
         const QColor fg = statusColor(od.status);
-        const QColor bg = QColor(fg.red(), fg.green(), fg.blue(), 26); // 轻背景
+        const QColor bg = QColor(fg.red(), fg.green(), fg.blue(), 26);
 
-        itemId->setForeground(QBrush(fg));
-        itemTitle->setForeground(QBrush(fg));
-        itemDesc->setForeground(QBrush(fg));
-        itemStatus->setForeground(QBrush(fg));
-
-        itemId->setBackground(QBrush(bg));
-        itemTitle->setBackground(QBrush(bg));
-        itemDesc->setBackground(QBrush(bg));
-        itemStatus->setBackground(QBrush(bg));
-
-        tbl->setItem(i, 0, itemId);
-        tbl->setItem(i, 1, itemTitle);
-        tbl->setItem(i, 2, itemDesc);
-        tbl->setItem(i, 3, itemStatus);
+        auto put = [&](int col, const QString& text){
+            auto* it = new QTableWidgetItem(text);
+            it->setForeground(QBrush(fg));
+            it->setBackground(QBrush(bg));
+            tbl->setItem(i, col, it);
+        };
+        put(0, QString::number(od.id));
+        put(1, od.title);
+        put(2, od.desc);
+        put(3, od.publisher);
+        put(4, od.accepter);
+        put(5, od.status);
     }
     tbl->resizeColumnsToContents();
     tbl->clearSelection();
@@ -239,6 +240,9 @@ void ClientExpert::on_btnAccept_clicked()
     int id = orders[row].id;
     sendUpdateOrder(id, "已接受");
     setJoinedOrder(true);
+    // 接单后为通讯设置房间名
+    commWidget_->setConnectionInfo(QString::fromLatin1(SERVER_HOST), SERVER_PORT,
+                                   QString("order-%1").arg(id), g_expertUsername);
     QTimer::singleShot(150, this, [this]{ refreshOrders(); });
 }
 
@@ -268,6 +272,10 @@ void ClientExpert::sendUpdateOrder(int orderId, const QString& status)
         {"id", orderId},
         {"status", status}
     };
+    // 当专家接受时，把接受者写入，便于服务端与另一端展示
+    if (status == QStringLiteral("已接受")) {
+        req["expert_user"] = g_expertUsername;
+    }
     sock.write(QJsonDocument(req).toJson(QJsonDocument::Compact) + "\n");
     sock.waitForBytesWritten(1000);
     sock.waitForReadyRead(2000);
@@ -320,6 +328,8 @@ void ClientExpert::showOrderDetailsDialog(const OrderInfo& od)
     };
     layout->addWidget(mk("工单号：", QString::number(od.id)));
     layout->addWidget(mk("标题：", od.title));
+    layout->addWidget(mk("发布者：", od.publisher));
+    layout->addWidget(mk("接受者：", od.accepter));
     layout->addWidget(mk("状态：", od.status));
     QLabel* desc = new QLabel("<b>描述：</b>");
     QLabel* dval = new QLabel(od.desc);
@@ -331,7 +341,7 @@ void ClientExpert::showOrderDetailsDialog(const OrderInfo& od)
     connect(box, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
     connect(box, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
     layout->addWidget(box);
-    dlg.resize(520, 320);
+    dlg.resize(560, 360);
     dlg.exec();
 }
 
