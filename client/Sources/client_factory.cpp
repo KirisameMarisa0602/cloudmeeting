@@ -10,6 +10,7 @@
 #include <QTimer>
 #include <QDialog>
 #include <QVBoxLayout>
+#include <QHBoxLayout>
 #include <QLabel>
 #include <QLineEdit>
 #include <QTextEdit>
@@ -26,9 +27,9 @@ static const quint16 SERVER_PORT = 5555;
 extern QString g_factoryUsername;
 
 static QColor statusColor(const QString& s) {
-    if (s == QStringLiteral("已接受")) return QColor(16, 163, 74);   // green
-    if (s == QStringLiteral("已拒绝")) return QColor(220, 38, 38);   // red
-    return QColor(234, 179, 8);                                      // amber
+    if (s == QStringLiteral("已接受")) return QColor(34, 197, 94);   // 绿
+    if (s == QStringLiteral("已拒绝")) return QColor(220, 38, 38);   // 红
+    return QColor(234, 179, 8);                                      // 橙
 }
 
 class NewOrderDialog : public QDialog {
@@ -60,7 +61,6 @@ public:
         connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
     }
 };
-
 
 ClientFactory::ClientFactory(QWidget *parent) :
     QWidget(parent),
@@ -105,17 +105,14 @@ void ClientFactory::applyRoleUi()
 {
     setWindowTitle(QStringLiteral("工厂端 | 智能协同云会议"));
 
-    // Tab 文案更贴近角色语义（不更改索引结构）
     if (ui->tabWidget && ui->tabWidget->count() > 0) {
         ui->tabWidget->setTabText(0, QStringLiteral("工厂端 • 工单管理"));
     }
 
-    // 搜索提示
     if (ui->lineEditKeyword) {
         ui->lineEditKeyword->setPlaceholderText(QStringLiteral("按工单号/标题关键词搜索…"));
     }
 
-    // 若 UI 里状态下拉未初始化，这里做兜底（避免覆盖设计器里已有设置）
     if (ui->comboBoxStatus && ui->comboBoxStatus->count() == 0) {
         ui->comboBoxStatus->addItem("全部");
         ui->comboBoxStatus->addItem("待处理");
@@ -123,11 +120,15 @@ void ClientFactory::applyRoleUi()
         ui->comboBoxStatus->addItem("已拒绝");
     }
 
-    // 按钮提示
     if (ui->btnSearchOrder) ui->btnSearchOrder->setToolTip(QStringLiteral("按关键词与状态筛选"));
     if (ui->btnRefreshOrderStatus) ui->btnRefreshOrderStatus->setToolTip(QStringLiteral("刷新工单列表"));
     if (ui->btnDeleteOrder) ui->btnDeleteOrder->setToolTip(QStringLiteral("销毁所选工单"));
-    // btnNewOrder 点击信号一般由 UI 自动连接（on_btnNewOrder_clicked），这里不重复连接
+
+    // 表头&表格边框的轻微强化（与主题叠加）
+    this->setStyleSheet(this->styleSheet() +
+        " QHeaderView::section { background: rgba(34,197,94,0.18); }"
+        " QTableWidget { border: 1px solid rgba(34,197,94,0.45); }"
+    );
 }
 
 void ClientFactory::decorateOrdersTable()
@@ -141,12 +142,6 @@ void ClientFactory::decorateOrdersTable()
     tbl->verticalHeader()->setVisible(false);
     tbl->horizontalHeader()->setStretchLastSection(true);
     tbl->setShowGrid(true);
-
-    // 为深色主题优化的表头样式（不会影响逻辑）
-    this->setStyleSheet(this->styleSheet() +
-        " QHeaderView::section { background: rgba(255,255,255,0.06); color: #e5e7eb; border: 0; padding: 6px 8px; }"
-        " QTableWidget { gridline-color: rgba(229,231,235,0.1); }"
-    );
 }
 
 void ClientFactory::refreshOrders()
@@ -198,12 +193,18 @@ void ClientFactory::refreshOrders()
         auto* itemDesc = new QTableWidgetItem(od.desc);
         auto* itemStatus = new QTableWidgetItem(od.status);
 
-        // 状态色彩（前景色），并为整行赋予柔和色彩，便于一眼区分
         const QColor fg = statusColor(od.status);
+        const QColor bg = QColor(fg.red(), fg.green(), fg.blue(), 26);
+
         itemId->setForeground(QBrush(fg));
         itemTitle->setForeground(QBrush(fg));
         itemDesc->setForeground(QBrush(fg));
         itemStatus->setForeground(QBrush(fg));
+
+        itemId->setBackground(QBrush(bg));
+        itemTitle->setBackground(QBrush(bg));
+        itemDesc->setBackground(QBrush(bg));
+        itemStatus->setBackground(QBrush(bg));
 
         tbl->setItem(i, 0, itemId);
         tbl->setItem(i, 1, itemTitle);

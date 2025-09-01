@@ -35,7 +35,7 @@ private slots:
     void on_btnReject_clicked();
     void on_tabChanged(int idx);
     void onSearchOrder();
-    void onOrderDoubleClicked(int row, int column); // 新增：双击查看详情
+    void onOrderDoubleClicked(int row, int column); // 新增：双击详情
 
 private:
     Ui::ClientExpert *ui;

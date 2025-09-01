@@ -27,7 +27,7 @@ private slots:
     void on_btnDeleteOrder_clicked();
     void on_tabChanged(int idx);
     void onSearchOrder();
-    void onOrderDoubleClicked(int row, int column); // 新增：双击查看详情
+    void onOrderDoubleClicked(int row, int column); // 新增：双击详情
 
 private:
     Ui::ClientFactory *ui;
@@ -37,7 +37,7 @@ private:
     void updateTabEnabled();
     void sendCreateOrder(const QString& title, const QString& desc);
 
-    // 新增：UI 装饰与工具
+    // UI 装饰与工具
     void applyRoleUi();
     void decorateOrdersTable();
 

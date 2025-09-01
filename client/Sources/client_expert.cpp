@@ -14,12 +14,12 @@
 #include <QAbstractItemView>
 #include <QDialog>
 #include <QVBoxLayout>
+#include <QHBoxLayout>
 #include <QLabel>
 #include <QDialogButtonBox>
 #include <QBrush>
 #include <QColor>
 
-// 与工厂端共享的全局用户变量
 QString g_factoryUsername;
 QString g_expertUsername;
 
@@ -27,9 +27,9 @@ static const char* SERVER_HOST = "127.0.0.1";
 static const quint16 SERVER_PORT = 5555;
 
 static QColor statusColor(const QString& s) {
-    if (s == QStringLiteral("已接受")) return QColor(22, 163, 74);   // green
-    if (s == QStringLiteral("已拒绝")) return QColor(220, 38, 38);   // red
-    return QColor(234, 179, 8);                                      // amber (待处理/默认)
+    if (s == QStringLiteral("已接受")) return QColor(59, 130, 246);  // 蓝
+    if (s == QStringLiteral("已拒绝")) return QColor(220, 38, 38);   // 红
+    return QColor(234, 179, 8);                                      // 橙
 }
 
 ClientExpert::ClientExpert(QWidget *parent) :
@@ -38,7 +38,7 @@ ClientExpert::ClientExpert(QWidget *parent) :
 {
     ui->setupUi(this);
 
-    // 实时通讯模块集成（与现有一致）
+    // 实时通讯模块集成
     commWidget_ = new CommWidget(this);
     ui->verticalLayoutTabRealtime->addWidget(commWidget_);
 
@@ -58,7 +58,7 @@ ClientExpert::ClientExpert(QWidget *parent) :
     applyRoleUi();
     decorateOrdersTable();
 
-    // 状态筛选（保留现有设置）
+    // 状态筛选（保留）
     ui->comboBoxStatus->clear();
     ui->comboBoxStatus->addItem("全部");
     ui->comboBoxStatus->addItem("待处理");
@@ -82,21 +82,24 @@ void ClientExpert::applyRoleUi()
 {
     setWindowTitle(QStringLiteral("专家端 | 智能协同云会议"));
 
-    // Tab 文案更贴近角色语义（不更改索引结构）
     if (ui->tabWidget && ui->tabWidget->count() > 0) {
         ui->tabWidget->setTabText(0, QStringLiteral("专家端 • 工单中心"));
     }
 
-    // 搜索提示
     if (ui->lineEditKeyword) {
         ui->lineEditKeyword->setPlaceholderText(QStringLiteral("按工单号/标题关键词搜索…"));
     }
 
-    // 按钮提示
     if (ui->btnAccept) ui->btnAccept->setToolTip(QStringLiteral("接受所选工单并进入协作"));
     if (ui->btnReject) ui->btnReject->setToolTip(QStringLiteral("拒绝所选工单"));
     if (ui->btnRefreshOrderStatus) ui->btnRefreshOrderStatus->setToolTip(QStringLiteral("刷新工单列表"));
     if (ui->btnSearchOrder) ui->btnSearchOrder->setToolTip(QStringLiteral("按关键词与状态筛选"));
+
+    // 表头&表格边框的轻微强化（与主题叠加）
+    this->setStyleSheet(this->styleSheet() +
+        " QHeaderView::section { background: rgba(59,130,246,0.18); }"
+        " QTableWidget { border: 1px solid rgba(59,130,246,0.45); }"
+    );
 }
 
 void ClientExpert::decorateOrdersTable()
@@ -110,12 +113,6 @@ void ClientExpert::decorateOrdersTable()
     tbl->verticalHeader()->setVisible(false);
     tbl->horizontalHeader()->setStretchLastSection(true);
     tbl->setShowGrid(true);
-
-    // 为深色主题优化的表头样式（不会影响逻辑）
-    this->setStyleSheet(this->styleSheet() +
-        " QHeaderView::section { background: rgba(255,255,255,0.06); color: #e5e7eb; border: 0; padding: 6px 8px; }"
-        " QTableWidget { gridline-color: rgba(229,231,235,0.1); }"
-    );
 }
 
 void ClientExpert::setJoinedOrder(bool joined)
@@ -126,8 +123,9 @@ void ClientExpert::setJoinedOrder(bool joined)
 
 void ClientExpert::updateTabEnabled()
 {
-    ui->tabWidget->setTabEnabled(1, joinedOrder);
-    ui->tabWidget->setTabEnabled(3, joinedOrder);
+    // 改为“始终启用”Tab，通过切换时拦截来提示更友好
+    ui->tabWidget->setTabEnabled(1, true);
+    ui->tabWidget->setTabEnabled(3, true);
 }
 
 void ClientExpert::refreshOrders()
@@ -179,12 +177,18 @@ void ClientExpert::refreshOrders()
         auto* itemDesc = new QTableWidgetItem(od.desc);
         auto* itemStatus = new QTableWidgetItem(od.status);
 
-        // 状态色彩（前景色），并为整行赋予柔和色彩，便于一眼区分
         const QColor fg = statusColor(od.status);
+        const QColor bg = QColor(fg.red(), fg.green(), fg.blue(), 28); // 轻背景
+
         itemId->setForeground(QBrush(fg));
         itemTitle->setForeground(QBrush(fg));
         itemDesc->setForeground(QBrush(fg));
         itemStatus->setForeground(QBrush(fg));
+
+        itemId->setBackground(QBrush(bg));
+        itemTitle->setBackground(QBrush(bg));
+        itemDesc->setBackground(QBrush(bg));
+        itemStatus->setBackground(QBrush(bg));
 
         tbl->setItem(i, 0, itemId);
         tbl->setItem(i, 1, itemTitle);
@@ -248,6 +252,12 @@ void ClientExpert::sendUpdateOrder(int orderId, const QString& status)
 
 void ClientExpert::on_tabChanged(int idx)
 {
+    // idx==0 工单中心；1/3 为需要加入工单后才可交互的页面
+    if ((idx == 1 || idx == 3) && !joinedOrder) {
+        QMessageBox::information(this, "提示", "暂无待处理工单");
+        ui->tabWidget->setCurrentIndex(0);
+        return;
+    }
     if (idx == 0) refreshOrders();
 }
 
