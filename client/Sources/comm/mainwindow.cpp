@@ -39,6 +39,8 @@
 #include "protocol.h"
 #include "udpmedia.h"
 #include "volume_popup.h"
+#include "audiochat.h"
+#include "screenshare.h"
 
 // 将图像按控件尺寸等比例缩放后设置
 static void fitLabelImage(QLabel* lbl, const QImage& img) {
@@ -169,14 +171,16 @@ MainWindow::MainWindow(QWidget *parent)
     row1->addWidget(btnConn);
     root->addLayout(row1);
 
-    // 加入栏
+    // 加入/退出栏（新增“退出房间”按钮）
     QHBoxLayout *row2 = new QHBoxLayout;
     edUser = new QLineEdit("user-A");
     edRoom = new QLineEdit("Room1");
-    QPushButton *btnJoin = new QPushButton("加入房间");
+    QPushButton *btnJoin  = new QPushButton("加入房间");
+    QPushButton *btnLeave = new QPushButton("退出房间");
     row2->addWidget(new QLabel("User:"));  row2->addWidget(edUser);
     row2->addWidget(new QLabel("Room:"));  row2->addWidget(edRoom);
     row2->addWidget(btnJoin);
+    row2->addWidget(btnLeave);
     root->addLayout(row2);
 
     // 文本消息（上方这行隐藏且不加入布局，避免占位）
@@ -326,6 +330,7 @@ MainWindow::MainWindow(QWidget *parent)
     // 绑定
     connect(btnConn,   &QPushButton::clicked, this, &MainWindow::onConnect);
     connect(btnJoin,   &QPushButton::clicked, this, &MainWindow::onJoin);
+    connect(btnLeave,  &QPushButton::clicked, this, &MainWindow::onLeave); // 新增
     connect(btnSend,   &QPushButton::clicked, this, &MainWindow::onSendText);
     connect(btnCamera_,&QPushButton::clicked, this, &MainWindow::onToggleCamera);
     connect(btnShare_, &QPushButton::clicked, this, &MainWindow::onToggleShare);
@@ -603,6 +608,44 @@ void MainWindow::onSendText()
     edInput->clear();
 }
 
+/* 新增：退出房间 */
+// 替换你的 onLeave() 为如下实现
+void MainWindow::onLeave()
+{
+    // 断开 TCP -> 服务器将广播 leave
+    conn_.disconnectFromHost();
+
+    // 停止本地媒体
+    stopCamera();
+    if (audio_->isEnabled()) {
+        audio_->setEnabled(false);
+        btnMic_->setText("开启麦克风");
+    }
+    if (share_->isEnabled()) {
+        share_->setEnabled(false);
+        btnShare_->setText("开启共享屏幕");
+    }
+    localTile_.lastScreen = QImage();
+    refreshTilePixmap(&localTile_);
+    if (mainKey_ == kLocalKey_) updateMainFromTile(&localTile_);
+    if (mainKey_ == kLocalKey_ && localTile_.lastCam.isNull()) setMainKey(QString());
+
+    // 清空远端窗口
+    const auto keys = remoteTiles_.keys();
+    for (const QString& k : keys) removeRemoteTile(k);
+
+    // 重置显示
+    localTile_.name->setText(QStringLiteral("我（本地预览）"));
+    refreshGridOnly();
+
+    // 复位身份，避免后续误发送
+    audio_->setIdentity(QString(), QString());
+    share_->setIdentity(QString(), QString());
+    udp_->setIdentity(QString(), QString());
+
+    txtLog->append("已退出房间");
+}
+
 void MainWindow::applyAdaptiveByMembers(int members)
 {
     if (members <= 2) { sendSize_ = QSize(640,480); targetFps_ = 12; jpegQuality_ = 60; }
@@ -677,6 +720,8 @@ void MainWindow::onPkt(Packet p)
     case MSG_SERVER_EVENT:
     {
         const QString kind = p.json.value("kind").toString();
+
+        // 情况一：服务器推送房间成员完整列表（进入/退出都会触发）
         if (kind == "room") {
             QStringList members;
             for (auto v : p.json.value("members").toArray())
@@ -685,6 +730,7 @@ void MainWindow::onPkt(Packet p)
             QSet<QString> shouldHave = QSet<QString>::fromList(members);
             shouldHave.remove(edUser->text());
 
+            // 确保列表里的用户都有窗口
             for (const QString& u : shouldHave) {
                 VideoTile* t = ensureRemoteTile(u);
                 if (t && t->lastCam.isNull() && t->lastScreen.isNull()) {
@@ -692,6 +738,7 @@ void MainWindow::onPkt(Packet p)
                 }
             }
 
+            // 移除已不在房间的用户窗口
             for (auto it = remoteTiles_.begin(); it != remoteTiles_.end(); ) {
                 if (!shouldHave.contains(it.key())) {
                     if (mainKey_ == it.key()) setMainKey(QString());
@@ -706,6 +753,27 @@ void MainWindow::onPkt(Packet p)
 
             if (currentMode() == ViewMode::Grid) refreshGridOnly();
             else refreshFocusThumbs();
+        }
+        // 情况二：服务器发出单个用户进入/退出事件（兼容不同后端）
+        else if (kind == "member_join" || kind == "user_join" || kind == "join") {
+            QString u = p.json.value("user").toString();
+            if (u.isEmpty()) u = p.json.value("name").toString();
+            if (!u.isEmpty() && u != edUser->text()) {
+                ensureRemoteTile(u);
+                applyAdaptiveByMembers(int(remoteTiles_.size()) + 1);
+                if (currentMode() == ViewMode::Grid) refreshGridOnly();
+                else refreshFocusThumbs();
+            }
+        } else if (kind == "member_leave" || kind == "user_leave" || kind == "leave") {
+            QString u = p.json.value("user").toString();
+            if (u.isEmpty()) u = p.json.value("name").toString();
+            if (!u.isEmpty() && u != edUser->text()) {
+                if (mainKey_ == u) setMainKey(QString());
+                removeRemoteTile(u);
+                applyAdaptiveByMembers(int(remoteTiles_.size()) + 1);
+                if (currentMode() == ViewMode::Grid) refreshGridOnly();
+                else refreshFocusThumbs();
+            }
         } else {
             txtLog->append(QString("[server] %1")
                            .arg(QString::fromUtf8(QJsonDocument(p.json).toJson(QJsonDocument::Compact))));

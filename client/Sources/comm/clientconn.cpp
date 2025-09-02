@@ -12,6 +12,10 @@ void ClientConn::connectTo(const QString& host, quint16 port) {
     sock_.connectToHost(host, port);
 }
 
+void ClientConn::disconnectFromHost() {          // 新增：断开连接
+    sock_.disconnectFromHost();
+}
+
 void ClientConn::send(quint16 type, const QJsonObject& json, const QByteArray& bin) {
     if (sock_.state() == QAbstractSocket::ConnectedState) {
         sock_.write(buildPacket(type, json, bin));

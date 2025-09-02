@@ -8,6 +8,7 @@ class ClientConn : public QObject {
 public:
     explicit ClientConn(QObject* parent=nullptr);
     void connectTo(const QString& host, quint16 port);
+    void disconnectFromHost();                    // 新增：断开连接
     void send(quint16 type, const QJsonObject& json, const QByteArray& bin = QByteArray());
 
     bool isConnected() const { return sock_.state() == QAbstractSocket::ConnectedState; }
