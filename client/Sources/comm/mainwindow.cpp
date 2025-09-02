@@ -179,16 +179,16 @@ MainWindow::MainWindow(QWidget *parent)
     row2->addWidget(btnJoin);
     root->addLayout(row2);
 
-    // 文本消息
-    QHBoxLayout *row3 = new QHBoxLayout;
-    edInput = new QLineEdit;
-    QPushButton *btnSend = new QPushButton("发送文本");
-    row3->addWidget(edInput); row3->addWidget(btnSend);
-    root->addLayout(row3);
+    // 文本消息（上方这行隐藏且不加入布局，避免占位）
+    edInput = new QLineEdit(w);
+    QPushButton *btnSend = new QPushButton("发送文本", w);
+    edInput->setVisible(false);
+    btnSend->setVisible(false);
 
-    // 日志
-    txtLog = new QTextEdit; txtLog->setReadOnly(true);
-    root->addWidget(txtLog, 0);
+    // 日志（隐藏且不加入布局，避免占位）
+    txtLog = new QTextEdit(w);
+    txtLog->setReadOnly(true);
+    txtLog->setVisible(false);
 
     // 中央栈：Grid + Focus
     centerStack_ = new QStackedWidget(w);
@@ -512,7 +512,6 @@ MainWindow::MainWindow(QWidget *parent)
     setMainKey(QString());
     refreshGridOnly();
 }
-
 /* ---------- 事件处理 ---------- */
 bool MainWindow::eventFilter(QObject* watched, QEvent* event)
 {
