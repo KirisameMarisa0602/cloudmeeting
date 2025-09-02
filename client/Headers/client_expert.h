@@ -27,6 +27,8 @@ private slots:
     void on_tabChanged(int idx);
     void onSearchOrder();
     void onOrderDoubleClicked(int row, int column);
+    // 新增：表格右键菜单
+    void onOrdersTableContextMenuRequested(const QPoint& pos);
 
 private:
     Ui::ClientExpert *ui;

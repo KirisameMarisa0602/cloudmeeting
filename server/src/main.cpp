@@ -244,23 +244,46 @@ static QJsonObject handleUpdateOrder(const QJsonObject& req, QSqlDatabase& db)
 {
     const int id = req.value("id").toInt();
     const QString status = req.value("status").toString().trimmed();
-    const QString accepter = req.value("accepter").toString().trimmed();
+    const QString operatorName = req.value("accepter").toString().trimmed(); // 操作人（专家用户名）
 
     if (id <= 0 || status.isEmpty()) return errReply("参数不完整");
 
-    QSqlQuery q(db);
-    if (status == QStringLiteral("已接受") && !accepter.isEmpty()) {
-        q.prepare("UPDATE orders SET status=?, accepter=? WHERE id=?");
-        q.addBindValue(status);
-        q.addBindValue(accepter);
-        q.addBindValue(id);
+    // 读取当前状态与接受者
+    QSqlQuery qsel(db);
+    qsel.prepare("SELECT status, accepter FROM orders WHERE id=?");
+    qsel.addBindValue(id);
+    if (!qsel.exec()) return errReply("数据库错误: " + qsel.lastError().text());
+    if (!qsel.next()) return errReply("工单不存在");
+
+    const QString curStatus = qsel.value(0).toString();
+    const QString curAccepter = qsel.value(1).toString();
+
+    // 权限与一致性校验
+    if (status == QStringLiteral("已接受")) {
+        if (operatorName.isEmpty())
+            return errReply("接受工单需要提供 accepter（专家用户名）");
+        if (!curAccepter.isEmpty() && curAccepter != operatorName) {
+            return errReply("该工单已被其他专家接受，无法再次接受");
+        }
+        QSqlQuery qup(db);
+        qup.prepare("UPDATE orders SET status=?, accepter=? WHERE id=?");
+        qup.addBindValue(status);
+        qup.addBindValue(operatorName);
+        qup.addBindValue(id);
+        if (!qup.exec()) return errReply("数据库错误: " + qup.lastError().text());
+        return okReply();
     } else {
-        q.prepare("UPDATE orders SET status=? WHERE id=?");
-        q.addBindValue(status);
-        q.addBindValue(id);
+        // 回滚或拒绝：仅允许“当前无接受者”或“由当前专家接受”的工单
+        if (!curAccepter.isEmpty() && curAccepter != operatorName) {
+            return errReply("无权限修改：仅原接受者可修改该工单状态");
+        }
+        QSqlQuery qup(db);
+        qup.prepare("UPDATE orders SET status=?, accepter='' WHERE id=?");
+        qup.addBindValue(status);
+        qup.addBindValue(id);
+        if (!qup.exec()) return errReply("数据库错误: " + qup.lastError().text());
+        return okReply();
     }
-    if (!q.exec()) return errReply("数据库错误: " + q.lastError().text());
-    return okReply();
 }
 
 static QJsonObject handleDeleteOrder(const QJsonObject& req, QSqlDatabase& db)

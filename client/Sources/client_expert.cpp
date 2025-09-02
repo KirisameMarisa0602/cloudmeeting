@@ -18,6 +18,8 @@
 #include <QAbstractItemView>
 #include <QPushButton>
 #include <QShortcut>
+#include <QMenu>
+#include <QAction>
 
 static QColor statusColor(const QString& s) {
     if (s == QStringLiteral("待处理")) return QColor("#E6A23C");
@@ -95,6 +97,11 @@ void ClientExpert::decorateOrdersTable()
     t->setSelectionMode(QAbstractItemView::SingleSelection);
     t->setEditTriggers(QAbstractItemView::NoEditTriggers);
     connect(t, &QTableWidget::cellDoubleClicked, this, &ClientExpert::onOrderDoubleClicked);
+
+    // 新增：右键菜单支持状态切换（回滚/二次流转）
+    t->setContextMenuPolicy(Qt::CustomContextMenu);
+    connect(t, &QTableWidget::customContextMenuRequested,
+            this, &ClientExpert::onOrdersTableContextMenuRequested);
 }
 
 void ClientExpert::setJoinedOrder(bool joined) { joinedOrder = joined; updateTabEnabled(); }
@@ -104,9 +111,15 @@ void ClientExpert::updateTabEnabled()
     bool hasSelection = ui->tableOrders->currentRow() >= 0;
     QString status;
     if (hasSelection) status = ui->tableOrders->item(ui->tableOrders->currentRow(), 3)->text();
-    const bool canAct = hasSelection && status == QStringLiteral("待处理");
-    ui->btnAccept->setEnabled(canAct);
-    ui->btnReject->setEnabled(canAct);
+
+    // 允许二次流转：当选中时启用对应按钮
+    // - 接受：除非当前已是“已接受”
+    // - 拒绝：除非当前已是“已拒绝”
+    const bool canAccept = hasSelection && status != QStringLiteral("已接受");
+    const bool canReject = hasSelection && status != QStringLiteral("已拒绝");
+
+    ui->btnAccept->setEnabled(canAccept);
+    ui->btnReject->setEnabled(canReject);
 }
 
 void ClientExpert::refreshOrders()
@@ -152,18 +165,13 @@ void ClientExpert::refreshOrders()
 
 void ClientExpert::sendUpdateOrder(int orderId, const QString& status)
 {
-    // 前端校验：仅“待处理”允许操作
-    for (const auto& od : orders) {
-        if (od.id == orderId && od.status != QStringLiteral("待处理")) {
-            QMessageBox::information(this, "提示", "该工单当前状态不允许操作");
-            return;
-        }
-    }
-
+    // 放开前端限制：允许对任意状态进行更新（权限在后端校验）
     QJsonObject rep;
     QString err;
     QJsonObject req{{"action","update_order"},{"id",orderId},{"status",status}};
-    if (status == QStringLiteral("已接受")) req["accepter"] = UserSession::expertUsername;
+    // 重要：所有状态更新都携带当前专家用户名，便于服务端做权限控制
+    req["accepter"] = UserSession::expertUsername;
+
     if (!sendRequest(req, rep, &err)) { QMessageBox::warning(this, "更新工单失败", err); return; }
     if (!rep.value("ok").toBool()) { QMessageBox::warning(this, "更新工单失败", rep.value("msg").toString("未知错误")); return; }
     refreshOrders();
@@ -244,4 +252,34 @@ void ClientExpert::logoutToLogin()
     this->hide();
     auto* login = new Login();
     login->show();
+}
+
+void ClientExpert::onOrdersTableContextMenuRequested(const QPoint& pos)
+{
+    auto* t = ui->tableOrders;
+    int row = t->rowAt(pos.y());
+    if (row < 0) return;
+
+    const int id = t->item(row,0)->data(Qt::UserRole).toInt();
+    const QString curStatus = t->item(row,3)->text();
+
+    QMenu menu(this);
+    QAction* actPending = menu.addAction(QStringLiteral("设为：待处理"));
+    QAction* actAccept  = menu.addAction(QStringLiteral("设为：已接受"));
+    QAction* actReject  = menu.addAction(QStringLiteral("设为：已拒绝"));
+
+    actPending->setEnabled(curStatus != QStringLiteral("待处理"));
+    actAccept->setEnabled(curStatus != QStringLiteral("已接受"));
+    actReject->setEnabled(curStatus != QStringLiteral("已拒绝"));
+
+    QAction* chosen = menu.exec(t->viewport()->mapToGlobal(pos));
+    if (!chosen) return;
+
+    if (chosen == actPending) {
+        sendUpdateOrder(id, QStringLiteral("待处理"));
+    } else if (chosen == actAccept) {
+        sendUpdateOrder(id, QStringLiteral("已接受"));
+    } else if (chosen == actReject) {
+        sendUpdateOrder(id, QStringLiteral("已拒绝"));
+    }
 }
