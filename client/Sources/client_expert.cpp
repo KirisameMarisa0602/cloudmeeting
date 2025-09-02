@@ -164,22 +164,22 @@ void ClientExpert::refreshOrders()
     setJoinedOrder(hasMyAcceptedOrder());
 }
 
+// 替换整段函数实现
 void ClientExpert::sendUpdateOrder(int orderId, const QString& status)
 {
-    // 前端校验：仅“待处理”允许操作（如需二次流转，请按你前一步“方案 A”放开这里）
-    for (const auto& od : orders) {
-        if (od.id == orderId && od.status != QStringLiteral("待处理")) {
-            QMessageBox::information(this, "提示", "该工单当前状态不允许操作");
-            return;
-        }
-    }
-
     QJsonObject rep;
     QString err;
     QJsonObject req{{"action","update_order"},{"id",orderId},{"status",status}};
     if (status == QStringLiteral("已接受")) req["accepter"] = UserSession::expertUsername;
-    if (!sendRequest(req, rep, &err)) { QMessageBox::warning(this, "更新工单失败", err); return; }
-    if (!rep.value("ok").toBool()) { QMessageBox::warning(this, "更新工单失败", rep.value("msg").toString("未知错误")); return; }
+
+    if (!sendRequest(req, rep, &err)) {
+        QMessageBox::warning(this, "更新工单失败", err);
+        return;
+    }
+    if (!rep.value("ok").toBool()) {
+        QMessageBox::warning(this, "更新工单失败", rep.value("msg").toString("未知错误"));
+        return;
+    }
     refreshOrders();
 }
 
