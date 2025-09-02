@@ -32,6 +32,8 @@ qrc_*.cpp
 *.dylib
 *.dll
 *.exe
+cloudmeeting-server
+cloudmeeting-client
 
 # Make/CMake/other build files
 Makefile

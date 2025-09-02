@@ -40,4 +40,7 @@ private:
 
     // 新增：给指定 socket 发送当前成员列表（用于刚加入的人）
     void sendRoomMembersTo(QTcpSocket* target, const QString& roomId, const QString& event, const QString& whoChanged);
+
+    // 拥塞通知帮助方法
+    void notifyCongestion(QTcpSocket* target, qint64 backlogBytes);
 };

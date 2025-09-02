@@ -1,5 +1,6 @@
 #include "audiochat.h"
 #include <QDateTime>
+#include <cmath>
 
 // Qt 5.12.8 兼容的设备信息头
 #if __has_include(<QtMultimedia/QAudioDeviceInfo>)
@@ -168,9 +169,19 @@ void AudioChat::onMicReadyRead() {
 }
 
 void AudioChat::shrinkQueueIfNeeded(QByteArray& q) {
-    const int maxBytes = kMaxQueueFrames * kPcmBytesPerFrm;
-    if (q.size() > maxBytes) {
-        q.remove(0, q.size() - maxBytes);
+    const int softMaxBytes = kMaxQueueFrames * kPcmBytesPerFrm;      // 50帧软上限
+    const int hardMaxBytes = softMaxBytes * 2;                      // 100帧硬上限，防止runaway latency
+    
+    if (q.size() > hardMaxBytes) {
+        // 硬上限：直接截断到软上限
+        q.remove(0, q.size() - softMaxBytes);
+        qWarning() << "[AudioChat] Hard cap triggered, queue truncated to" << softMaxBytes << "bytes";
+    } else if (q.size() > softMaxBytes) {
+        // 软上限：温和缩减，移除最老的25%
+        int removeBytes = (q.size() - softMaxBytes) / 4 * 4; // 对齐到4字节边界
+        if (removeBytes > 0) {
+            q.remove(0, removeBytes);
+        }
     }
 }
 
@@ -217,17 +228,44 @@ void AudioChat::mixTick() {
     qint16* md = reinterpret_cast<qint16*>(mix.data());
     for (int i = 0; i < kFrameSamples; ++i) md[i] = 0;
 
+    // 简单VAD检测：记录当前最活跃的说话者（仅内部使用）
+    QString activeSpeaker;
+    float maxEnergy = 0.0f;
+    const float energyThreshold = 1000.0f; // 保守阈值，避免误触发
+
     for (auto it = rxQueues_.begin(); it != rxQueues_.end(); ++it) {
         QByteArray& q = it.value();
         if (q.size() < need) continue;
         const qint16* s = reinterpret_cast<const qint16*>(q.constData());
         const float g = peerGain_.value(it.key(), 1.0f) * playbackGain_;
+        
+        // 计算当前帧的能量（RMS）
+        float energy = 0.0f;
+        for (int i = 0; i < kFrameSamples; ++i) {
+            float sample = static_cast<float>(s[i]);
+            energy += sample * sample;
+        }
+        energy = std::sqrt(energy / kFrameSamples);
+        
+        // VAD检测：记录最活跃说话者
+        if (energy > energyThreshold && energy > maxEnergy) {
+            maxEnergy = energy;
+            activeSpeaker = it.key();
+        }
+        
+        // 混音
         for (int i = 0; i < kFrameSamples; ++i) {
             int v = md[i] + static_cast<int>(s[i] * g);
             if (v > 32767) v = 32767; else if (v < -32768) v = -32768;
             md[i] = static_cast<qint16>(v);
         }
         q.remove(0, need);
+    }
+
+    // VAD结果可以在未来用于UI指示，目前保持内部
+    if (!activeSpeaker.isEmpty()) {
+        // 预留：可发射信号或记录活跃说话者状态
+        // emit activeSpeakerChanged(activeSpeaker, maxEnergy);
     }
 
     outDev_->write(mix);

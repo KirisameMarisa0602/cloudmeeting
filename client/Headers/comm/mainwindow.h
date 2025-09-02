@@ -73,6 +73,7 @@ private slots:
     void onLocalScreenFrame(QImage img);
 
     void onPkt(Packet p);         // 只保留这一种签名
+    void onHeartbeat();           // 心跳定时器槽
 
 private:
     // 视图与排布
@@ -105,6 +106,14 @@ private:
     // 共享画质
     void applyShareQualityPreset();
     void applyAdaptiveByMembers(int members);
+
+    // 心跳与拥塞控制
+    void startHeartbeat();
+    void stopHeartbeat();
+    void sendPing();
+    void handleCongestion(qint64 backlogBytes);
+    void recoverStep();
+    void showNetHint(const QString& message);
 
     // 音量弹窗 / 标注
     void bindVolumeButton(VideoTile* t, bool isLocal);
@@ -177,4 +186,9 @@ private:
     int                          targetFps_ = 10;
     int                          jpegQuality_ = 55;
     QElapsedTimer                lastSend_;
+
+    // 心跳与拥塞控制
+    QTimer                       heartbeatTimer_;
+    QElapsedTimer                lastCongestion_;
+    bool                         inCongestion_ = false;
 };
