@@ -27,7 +27,7 @@ private slots:
     void on_tabChanged(int idx);
     void onSearchOrder();
     void onOrderDoubleClicked(int row, int column);
-    // 新增：表格右键菜单
+    // 新增：表格右键菜单（若你启用了右键状态切换）
     void onOrdersTableContextMenuRequested(const QPoint& pos);
 
 private:

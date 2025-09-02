@@ -87,7 +87,6 @@ ClientFactory::ClientFactory(QWidget *parent) :
     ui->tabWidget->setCornerWidget(labUserNameCorner_, Qt::TopLeftCorner);
 
     QPushButton* btnSwitch = new QPushButton(QStringLiteral("更改账号"), ui->tabWidget);
-    btnSwitch->setToolTip(QStringLiteral("返回登录页以更换账号（快捷键：Ctrl+L）"));
     btnSwitch->setCursor(Qt::PointingHandCursor);
     btnSwitch->setObjectName("btnSwitchAccount");
     ui->tabWidget->setCornerWidget(btnSwitch, Qt::TopRightCorner);
@@ -98,22 +97,28 @@ ClientFactory::ClientFactory(QWidget *parent) :
 
     decorateOrdersTable();
 
-    // 显式连接，彻底避免 on_btnNewOrder_clicked 的双连
-    connect(ui->btnNewOrder,    &QPushButton::clicked, this, &ClientFactory::handleNewOrderClicked);
+    // 事件绑定
+    connect(ui->tabWidget, &QTabWidget::currentChanged, this, &ClientFactory::on_tabChanged);
+    connect(ui->btnNewOrder, &QPushButton::clicked, this, &ClientFactory::handleNewOrderClicked);
     connect(ui->btnDeleteOrder, &QPushButton::clicked, this, &ClientFactory::on_btnDeleteOrder_clicked);
-    connect(ui->tabWidget,      &QTabWidget::currentChanged, this, &ClientFactory::on_tabChanged);
     connect(ui->btnSearchOrder, &QPushButton::clicked, this, &ClientFactory::onSearchOrder);
     if (auto btn = this->findChild<QPushButton*>("btnRefreshOrderStatus"))
         connect(btn, &QPushButton::clicked, this, &ClientFactory::onSearchOrder);
+
+    // 关键修复：监听表格选中变化，实时更新“销毁工单”按钮可用状态
+    connect(ui->tableOrders->selectionModel(), &QItemSelectionModel::selectionChanged,
+            this, [this](const QItemSelection&, const QItemSelection&){ updateTabEnabled(); });
 
     refreshOrders();
     updateTabEnabled();
 }
 
-ClientFactory::~ClientFactory() { delete ui; }
+ClientFactory::~ClientFactory()
+{
+    delete ui;
+}
 
 void ClientFactory::applyRoleUi() {}
-
 void ClientFactory::decorateOrdersTable()
 {
     auto* t = ui->tableOrders;
@@ -130,7 +135,8 @@ void ClientFactory::decorateOrdersTable()
 
 void ClientFactory::refreshOrders()
 {
-    QJsonObject rep; QString err;
+    QJsonObject rep;
+    QString err;
     if (!sendRequest(QJsonObject{
         {"action","get_orders"},
         {"role","factory"},
@@ -138,7 +144,8 @@ void ClientFactory::refreshOrders()
         {"status", ui->comboBoxStatus ? ui->comboBoxStatus->currentText() : QString()},
         {"keyword", ui->lineEditKeyword ? ui->lineEditKeyword->text().trimmed() : QString()}
     }, rep, &err)) {
-        QMessageBox::warning(this, "获取工单失败", err); return;
+        QMessageBox::warning(this, "获取工单失败", err);
+        return;
     }
     if (!rep.value("ok").toBool()) {
         QMessageBox::warning(this, "获取工单失败", rep.value("msg").toString("未知错误"));
@@ -146,6 +153,7 @@ void ClientFactory::refreshOrders()
     }
     orders.clear();
     const QJsonArray arr = rep.value("orders").toArray();
+    orders.reserve(arr.size());
     for (const auto& v : arr) orders.push_back(orderFromJson(v.toObject()));
 
     auto* t = ui->tableOrders;
@@ -160,7 +168,17 @@ void ClientFactory::refreshOrders()
         t->setItem(r,3,statusItem); t->setItem(r,4,new QTableWidgetItem(od.publisher));
         t->setItem(r,5,new QTableWidgetItem(od.accepter.isEmpty() ? "-" : od.accepter));
     }
+
+    // 刷新后自动选中第一行
+    if (t->rowCount() > 0) t->setCurrentCell(0, 0);
+
     updateTabEnabled();
+}
+
+void ClientFactory::updateTabEnabled()
+{
+    bool hasSelection = ui->tableOrders->currentRow() >= 0;
+    ui->btnDeleteOrder->setEnabled(hasSelection);
 }
 
 void ClientFactory::sendCreateOrder(const QString& title, const QString& desc)
@@ -181,12 +199,6 @@ void ClientFactory::sendCreateOrder(const QString& title, const QString& desc)
         return;
     }
     refreshOrders();
-}
-
-void ClientFactory::updateTabEnabled()
-{
-    bool hasSelection = ui->tableOrders->currentRow() >= 0;
-    ui->btnDeleteOrder->setEnabled(hasSelection);
 }
 
 void ClientFactory::handleNewOrderClicked()
@@ -211,7 +223,8 @@ void ClientFactory::on_btnDeleteOrder_clicked()
     if (QMessageBox::question(this, "确认", QString("确认销毁工单 #%1 ？").arg(id)) != QMessageBox::Yes) return;
 
     QJsonObject rep; QString err;
-    if (!sendRequest(QJsonObject{{"action","delete_order"},{"id",id},{"username", UserSession::factoryUsername}}, rep, &err)) {
+    // 修正为 factory_user，避免与后端不一致
+    if (!sendRequest(QJsonObject{{"action","delete_order"},{"id",id},{"factory_user", UserSession::factoryUsername}}, rep, &err)) {
         QMessageBox::warning(this, "销毁工单失败", err);
         return;
     }
