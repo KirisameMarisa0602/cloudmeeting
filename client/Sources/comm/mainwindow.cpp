@@ -512,6 +512,7 @@ MainWindow::MainWindow(QWidget *parent)
     setMainKey(QString());
     refreshGridOnly();
 }
+
 /* ---------- 事件处理 ---------- */
 bool MainWindow::eventFilter(QObject* watched, QEvent* event)
 {
