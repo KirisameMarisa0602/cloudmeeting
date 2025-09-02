@@ -516,6 +516,11 @@ MainWindow::MainWindow(QWidget *parent)
 
     setMainKey(QString());
     refreshGridOnly();
+
+    // 心跳定时器初始化
+    heartbeatTimer_.setInterval(5000); // 5秒心跳
+    connect(&heartbeatTimer_, &QTimer::timeout, this, &MainWindow::onHeartbeat);
+    lastCongestion_.start();
 }
 
 /* ---------- 事件处理 ---------- */
@@ -582,6 +587,9 @@ void MainWindow::onConnect()
     udp_->configureServer(edHost->text(), udpPort);
 
     txtLog->append("Connecting...");
+    
+    // 启动心跳
+    startHeartbeat();
 }
 void MainWindow::onJoin()
 {
@@ -612,6 +620,9 @@ void MainWindow::onSendText()
 // 替换你的 onLeave() 为如下实现
 void MainWindow::onLeave()
 {
+    // 停止心跳和定时器
+    stopHeartbeat();
+    
     // 断开 TCP -> 服务器将广播 leave
     conn_.disconnectFromHost();
 
@@ -634,6 +645,11 @@ void MainWindow::onLeave()
     const auto keys = remoteTiles_.keys();
     for (const QString& k : keys) removeRemoteTile(k);
 
+    // 禁用标注直到重新加入
+    btnAnnotOn_->setChecked(false);
+    annotCanvas_->setEnabledDrawing(false);
+    annotCanvas_->hide();
+
     // 重置显示
     localTile_.name->setText(QStringLiteral("我（本地预览）"));
     refreshGridOnly();
@@ -642,6 +658,9 @@ void MainWindow::onLeave()
     audio_->setIdentity(QString(), QString());
     share_->setIdentity(QString(), QString());
     udp_->setIdentity(QString(), QString());
+
+    // 重置拥塞状态
+    inCongestion_ = false;
 
     txtLog->append("已退出房间");
 }
@@ -665,6 +684,16 @@ void MainWindow::applyAdaptiveByMembers(int members)
 void MainWindow::onPkt(Packet p)
 {
     const QString me = edUser->text();
+
+    // 0) 心跳响应
+    if (p.type == MSG_PONG) {
+        // 可以记录延迟等，这里只是简单日志
+        qint64 serverTs = p.json.value("ts").toVariant().toLongLong();
+        qint64 now = QDateTime::currentMSecsSinceEpoch();
+        int rtt = int(now - serverTs);
+        qDebug() << "[HEARTBEAT] PONG received, RTT:" << rtt << "ms";
+        return;
+    }
 
     // 1) 加入确认（带 code 和 roomId），设置身份
     if (p.type == MSG_SERVER_EVENT && p.json.contains("code")) {
@@ -726,6 +755,16 @@ void MainWindow::onPkt(Packet p)
         refreshGridOnly();
         refreshFocusThumbs();
         return;
+    }
+
+    // 3) 网络事件：kind:"net" + event
+    if (p.type == MSG_SERVER_EVENT && p.json.value("kind").toString() == QLatin1String("net")) {
+        const QString event = p.json.value("event").toString();
+        if (event == QLatin1String("congested")) {
+            qint64 backlogBytes = p.json.value("backlog_bytes").toVariant().toLongLong();
+            handleCongestion(backlogBytes);
+            return;
+        }
     }
 
     // 3) 兜底：媒体/控制/标注到达即“按需创建”远端窗口（避免没有房间事件时看不到人）
@@ -1360,4 +1399,83 @@ AnnotModel* MainWindow::modelFor(const QString& key)
     auto* m = new AnnotModel();
     annotModels_.insert(key, m);
     return m;
+}
+
+/* ---------- 心跳与拥塞控制 ---------- */
+void MainWindow::startHeartbeat()
+{
+    heartbeatTimer_.start();
+}
+
+void MainWindow::stopHeartbeat()
+{
+    heartbeatTimer_.stop();
+}
+
+void MainWindow::sendPing()
+{
+    QJsonObject ping{{"ts", QDateTime::currentMSecsSinceEpoch()}};
+    conn_.send(MSG_PING, ping);
+}
+
+void MainWindow::onHeartbeat()
+{
+    sendPing();
+    
+    // 检查拥塞恢复
+    if (inCongestion_ && lastCongestion_.hasExpired(8000)) { // 8秒无拥塞
+        recoverStep();
+    }
+}
+
+void MainWindow::handleCongestion(qint64 backlogBytes)
+{
+    inCongestion_ = true;
+    lastCongestion_.restart();
+    
+    // 步降：减少帧率和质量
+    int newFps = qMax(6, targetFps_ - 2);
+    int newQuality = qMax(45, jpegQuality_ - 5);
+    
+    if (newFps != targetFps_ || newQuality != jpegQuality_) {
+        targetFps_ = newFps;
+        jpegQuality_ = newQuality;
+        
+        QString hint = QString("网络拥塞，已降低帧率/画质 (帧率:%1, 质量:%2, 积压:%3KB)")
+                      .arg(targetFps_).arg(jpegQuality_).arg(backlogBytes / 1024);
+        showNetHint(hint);
+        
+        // 应用新的摄像头参数
+        if (camera_) configureCamera(camera_);
+        // 屏幕共享会在下次发送时使用新的 jpegQuality_
+    }
+}
+
+void MainWindow::recoverStep()
+{
+    if (!inCongestion_) return;
+    
+    // 缓慢恢复：适度提升帧率和质量
+    int newFps = qMin(12, targetFps_ + 1);      // 不超过合理上限
+    int newQuality = qMin(60, jpegQuality_ + 2); // 不超过合理上限
+    
+    if (newFps != targetFps_ || newQuality != jpegQuality_) {
+        targetFps_ = newFps;
+        jpegQuality_ = newQuality;
+        
+        QString hint = QString("网络恢复，已提升画质 (帧率:%1, 质量:%2)")
+                      .arg(targetFps_).arg(jpegQuality_);
+        showNetHint(hint);
+        
+        // 应用新的摄像头参数
+        if (camera_) configureCamera(camera_);
+    }
+    
+    inCongestion_ = false;
+}
+
+void MainWindow::showNetHint(const QString& message)
+{
+    txtLog->append(QString("[网络] %1").arg(message));
+    qInfo() << "[ABR]" << message;
 }

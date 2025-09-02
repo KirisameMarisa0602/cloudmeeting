@@ -43,7 +43,7 @@ void RoomHub::onDisconnected() {
         broadcastRoomMembers(oldRoom, "leave", c->user);
     }
 
-    qInfo() << "Client disconnected" << c->user << c->roomId;
+    qInfo() << "[LEAVE]" << c->user << "from room" << c->roomId;
     clients_.erase(it);
     sock->deleteLater();
     delete c;
@@ -67,6 +67,13 @@ void RoomHub::onReadyRead() {
 }
 
 void RoomHub::handlePacket(ClientCtx* c, const Packet& p) {
+    // 心跳处理 - 无需加入房间即可响应
+    if (p.type == MSG_PING) {
+        QJsonObject pong{{"ts", QDateTime::currentMSecsSinceEpoch()}};
+        c->sock->write(buildPacket(MSG_PONG, pong));
+        return;
+    }
+
     if (p.type == MSG_JOIN_WORKORDER) {
         const QString roomId = p.json.value("roomId").toString();
         const QString user   = p.json.value("user").toString();
@@ -86,7 +93,7 @@ void RoomHub::handlePacket(ClientCtx* c, const Packet& p) {
         sendRoomMembersTo(c->sock, roomId, "snapshot", c->user);
 
         // 2) 广播“加入”事件给全房间
-        qInfo() << "Join" << roomId << "user" << (user.isEmpty() ? "(anonymous)" : user);
+        qInfo() << "[JOIN]" << roomId << "user" << (user.isEmpty() ? "(anonymous)" : user);
         broadcastRoomMembers(roomId, "join", c->user);
         return;
     }
@@ -147,6 +154,12 @@ void RoomHub::broadcastToRoom(const QString& roomId,
         QTcpSocket* s = i.value();
         if (s == except) continue;
         if (dropVideoIfBacklog && s->bytesToWrite() > kBacklogDropThreshold) {
+            // 拥塞时：1) 丢弃视频帧，2) 通知发送方步降
+            qInfo() << "[CONGESTION]" << "Dropped video for" << s->peerAddress().toString() 
+                    << "backlog:" << s->bytesToWrite() << "bytes";
+            if (except) { // except 是发送方
+                notifyCongestion(except, s->bytesToWrite());
+            }
             continue; // 丢弃视频帧
         }
         s->write(packet);
@@ -191,6 +204,18 @@ void RoomHub::sendRoomMembersTo(QTcpSocket* target, const QString& roomId, const
         {"roomId", roomId},
         {"who", whoChanged},
         {"members", QJsonArray::fromStringList(listMembers(roomId))},
+        {"ts", QDateTime::currentMSecsSinceEpoch()}
+    };
+    target->write(buildPacket(MSG_SERVER_EVENT, j));
+}
+
+void RoomHub::notifyCongestion(QTcpSocket* target, qint64 backlogBytes) {
+    if (!target) return;
+    QJsonObject j{
+        {"code", 0},
+        {"kind", "net"},
+        {"event", "congested"},
+        {"backlog_bytes", backlogBytes},
         {"ts", QDateTime::currentMSecsSinceEpoch()}
     };
     target->write(buildPacket(MSG_SERVER_EVENT, j));
