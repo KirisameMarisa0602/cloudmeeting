@@ -105,6 +105,10 @@ private:
     // 共享画质
     void applyShareQualityPreset();
     void applyAdaptiveByMembers(int members);
+    
+    // 拥塞控制
+    void onCongestionDetected();
+    void tryRecoverFromCongestion();
 
     // 音量弹窗 / 标注
     void bindVolumeButton(VideoTile* t, bool isLocal);
@@ -177,4 +181,10 @@ private:
     int                          targetFps_ = 10;
     int                          jpegQuality_ = 55;
     QElapsedTimer                lastSend_;
+    
+    // 拥塞控制
+    QElapsedTimer                lastCongestion_;
+    int                          baseFps_ = 10;      // 基础帧率
+    int                          baseQuality_ = 55;  // 基础质量
+    static constexpr int         kCongestionRecoveryMs = 30000; // 30秒后开始恢复
 };

@@ -642,17 +642,42 @@ void MainWindow::onLeave()
     audio_->setIdentity(QString(), QString());
     share_->setIdentity(QString(), QString());
     udp_->setIdentity(QString(), QString());
+    
+    // 重置拥塞控制状态
+    lastCongestion_ = QElapsedTimer();
+    lastSend_ = QElapsedTimer();
+    
+    // 清空标注模型
+    for (auto* model : annotModels_) {
+        if (model) model->clear();
+    }
 
-    txtLog->append("已退出房间");
+    txtLog->append("已退出房间，媒体状态已重置");
 }
 
 void MainWindow::applyAdaptiveByMembers(int members)
 {
-    if (members <= 2) { sendSize_ = QSize(640,480); targetFps_ = 12; jpegQuality_ = 60; }
-    else if (members <= 4) { sendSize_ = QSize(480,360); targetFps_ = 10; jpegQuality_ = 55; }
-    else { sendSize_ = QSize(320,240); targetFps_ = 8;  jpegQuality_ = 50; }
+    // 更严格的自适应预设，考虑网络性能
+    if (members <= 2) { 
+        sendSize_ = QSize(640,480); 
+        baseFps_ = targetFps_ = 15; 
+        baseQuality_ = jpegQuality_ = 65; 
+    }
+    else if (members <= 4) { 
+        sendSize_ = QSize(480,360); 
+        baseFps_ = targetFps_ = 12; 
+        baseQuality_ = jpegQuality_ = 60; 
+    }
+    else { 
+        sendSize_ = QSize(320,240); 
+        baseFps_ = targetFps_ = 10;  
+        baseQuality_ = jpegQuality_ = 55; 
+    }
 
-    txtLog->append(QString("自适应: members=%1, cam=%2x%3 @%4 q=%5")
+    // 尝试从拥塞状态恢复
+    tryRecoverFromCongestion();
+
+    txtLog->append(QString("自适应: members=%1, cam=%2x%3 @%4fps q=%5")
                    .arg(members).arg(sendSize_.width()).arg(sendSize_.height())
                    .arg(targetFps_).arg(jpegQuality_));
 
@@ -684,6 +709,19 @@ void MainWindow::onPkt(Packet p)
             }
             return;
         }
+    
+    // 新增：网络拥塞事件处理
+    if (p.type == MSG_SERVER_EVENT && p.json.value("kind").toString() == QLatin1String("net")) {
+        const QString event = p.json.value("event").toString();
+        if (event == QLatin1String("congested")) {
+            const qint64 backlogBytes = p.json.value("backlog_bytes").toVariant().toLongLong();
+            txtLog->append(QString("网络拥塞检测: backlog=%1MB, 降低画质")
+                          .arg(backlogBytes / (1024 * 1024)));
+            onCongestionDetected();
+        }
+        return;
+    }
+    
     // 2) 新协议的房间事件：kind:"room" + event
     if (p.type == MSG_SERVER_EVENT && p.json.value("kind").toString() == QLatin1String("room")) {
         const QString event = p.json.value("event").toString();   // "snapshot"/"join"/"leave"
@@ -1043,6 +1081,14 @@ void MainWindow::onVideoFrame(const QVideoFrame &frame)
 {
     if (!camera_ || !frame.isValid()) return;
 
+    // 基于 targetFps_ 的帧率限制
+    if (lastSend_.isValid()) {
+        const int targetInterval = 1000 / qMax(1, targetFps_); // ms per frame
+        if (lastSend_.elapsed() < targetInterval) {
+            return; // 跳过此帧，维持目标帧率
+        }
+    }
+
     QImage img = makeImageFromFrame(frame);
     if (img.isNull()) return;
 
@@ -1360,4 +1406,46 @@ AnnotModel* MainWindow::modelFor(const QString& key)
     auto* m = new AnnotModel();
     annotModels_.insert(key, m);
     return m;
+}
+
+/* ---------- 拥塞控制 ---------- */
+void MainWindow::onCongestionDetected()
+{
+    lastCongestion_.start();
+    
+    // 降低帧率（最少6fps）
+    targetFps_ = qMax(6, targetFps_ - 2);
+    
+    // 降低质量（最少45）
+    jpegQuality_ = qMax(45, jpegQuality_ - 5);
+    
+    txtLog->append(QString("拥塞适应: fps=%1, quality=%2").arg(targetFps_).arg(jpegQuality_));
+    
+    // 重新配置摄像头（如果存在）
+    if (camera_) configureCamera(camera_);
+}
+
+void MainWindow::tryRecoverFromCongestion()
+{
+    // 如果没有发生过拥塞，或者距离最后一次拥塞还不够久，不恢复
+    if (!lastCongestion_.isValid() || lastCongestion_.elapsed() < kCongestionRecoveryMs) {
+        return;
+    }
+    
+    // 逐步恢复到基础值（不超过）
+    bool recovered = false;
+    if (targetFps_ < baseFps_) {
+        targetFps_ = qMin(baseFps_, targetFps_ + 1);
+        recovered = true;
+    }
+    if (jpegQuality_ < baseQuality_) {
+        jpegQuality_ = qMin(baseQuality_, jpegQuality_ + 2);
+        recovered = true;
+    }
+    
+    if (recovered) {
+        txtLog->append(QString("拥塞恢复: fps=%1, quality=%2").arg(targetFps_).arg(jpegQuality_));
+        if (camera_) configureCamera(camera_);
+        lastCongestion_ = QElapsedTimer(); // 重置，避免频繁恢复
+    }
 }

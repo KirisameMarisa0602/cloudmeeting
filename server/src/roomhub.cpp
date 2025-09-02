@@ -67,6 +67,12 @@ void RoomHub::onReadyRead() {
 }
 
 void RoomHub::handlePacket(ClientCtx* c, const Packet& p) {
+    if (p.type == MSG_PING) {
+        QJsonObject pong{{"ts", QDateTime::currentMSecsSinceEpoch()}};
+        c->sock->write(buildPacket(MSG_PONG, pong));
+        return;
+    }
+
     if (p.type == MSG_JOIN_WORKORDER) {
         const QString roomId = p.json.value("roomId").toString();
         const QString user   = p.json.value("user").toString();
@@ -108,6 +114,25 @@ void RoomHub::handlePacket(ClientCtx* c, const Packet& p) {
         // 标注没有二进制（bin 为空），但用统一打包即可
         QByteArray raw = buildPacket(p.type, p.json, p.bin);
         const bool isVideo = (p.type == MSG_VIDEO_FRAME);
+        
+        // 检查拥塞并发送反馈
+        if (isVideo) {
+            auto range = rooms_.equal_range(c->roomId);
+            int droppedCount = 0;
+            for (auto i = range.first; i != range.second; ++i) {
+                QTcpSocket* s = i.value();
+                if (s == c->sock) continue;
+                if (s->bytesToWrite() > kBacklogDropThreshold) {
+                    droppedCount++;
+                }
+            }
+            if (droppedCount > 0) {
+                sendCongestionFeedback(c, kBacklogDropThreshold);
+                qInfo() << "Congestion detected for" << c->user << "in room" << c->roomId 
+                        << "- dropped to" << droppedCount << "clients";
+            }
+        }
+        
         // 视频帧在对端 backlog 太大时丢弃；其他消息（包含标注）不丢
         broadcastToRoom(c->roomId, raw, c->sock, isVideo);
 
@@ -194,4 +219,19 @@ void RoomHub::sendRoomMembersTo(QTcpSocket* target, const QString& roomId, const
         {"ts", QDateTime::currentMSecsSinceEpoch()}
     };
     target->write(buildPacket(MSG_SERVER_EVENT, j));
+}
+
+void RoomHub::sendCongestionFeedback(ClientCtx* sender, qint64 backlogBytes) {
+    if (!sender || !sender->sock) return;
+    
+    QJsonObject congestionEvent{
+        {"code", 0},
+        {"kind", "net"},
+        {"event", "congested"},
+        {"backlog_bytes", static_cast<qint64>(backlogBytes)},
+        {"socket_id", static_cast<qint64>(reinterpret_cast<quintptr>(sender->sock))},
+        {"ts", QDateTime::currentMSecsSinceEpoch()}
+    };
+    
+    sender->sock->write(buildPacket(MSG_SERVER_EVENT, congestionEvent));
 }
