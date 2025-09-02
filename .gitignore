@@ -60,3 +60,7 @@ Thumbs.db
 *.bak
 *.user
 .directory
+
+# Database files
+*.db
+*.sqlite
