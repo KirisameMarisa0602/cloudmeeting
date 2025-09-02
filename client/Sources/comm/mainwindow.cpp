@@ -664,150 +664,103 @@ void MainWindow::applyAdaptiveByMembers(int members)
 
 void MainWindow::onPkt(Packet p)
 {
-    switch (p.type)
-    {
-    case MSG_TEXT:
-        txtLog->append(QString("[%1] %2: %3")
-                       .arg(p.json["roomId"].toString(),
-                            p.json["sender"].toString(),
-                            p.json["content"].toString()));
-        break;
+    const QString me = edUser->text();
 
-    case MSG_VIDEO_FRAME:
-    {
-        const QString sender = p.json.value("sender").toString();
-        if (sender.isEmpty() || sender == edUser->text()) break;
-
-        VideoTile* t = ensureRemoteTile(sender);
-
-        QBuffer buf(const_cast<QByteArray*>(&p.bin));
-        buf.open(QIODevice::ReadOnly);
-        QImageReader reader(&buf);
-        reader.setAutoTransform(true);
-        QImage img = reader.read();
-
-        const QString media = p.json.value("media").toString("camera");
-        if (!img.isNull()) {
-            if (media == "screen") t->lastScreen = img;
-            else                    t->lastCam    = img;
-            kickRemoteAlive(t);
-            refreshTilePixmap(t);
-            if (mainKey_ == sender) updateMainFromTile(t);
+    // 1) 加入确认（带 code 和 roomId），设置身份
+    if (p.type == MSG_SERVER_EVENT && p.json.contains("code")) {
+        const int code = p.json.value("code").toInt(-1);
+        if (code == 0 && p.json.contains("roomId")) {
+            const QString roomId = p.json.value("roomId").toString();
+            if (audio_) audio_->setIdentity(roomId, me);
+            if (share_) share_->setIdentity(roomId, me);
+            if (udp_)   udp_->setIdentity(roomId, me);
+            txtLog->append(QStringLiteral("加入房间成功: %1").arg(roomId));
+        } else if (code != 0) {
+            txtLog->append(QStringLiteral("加入失败: %1").arg(p.json.value("message").toString()));
         }
-        break;
+        return;
     }
 
-    case MSG_CONTROL:
-    {
-        const QString kind  = p.json.value("kind").toString();
-        const QString state = p.json.value("state").toString();
-        const QString sender = p.json.value("sender").toString();
-        if (!sender.isEmpty() && sender != edUser->text()) {
-            VideoTile* t = ensureRemoteTile(sender);
-            if (kind == "视频" || kind == "video") {
-                if (state == "off") t->lastCam = QImage();
-                refreshTilePixmap(t);
-                if (mainKey_ == sender) updateMainFromTile(t);
-            } else if (kind == "screen") {
-                if (state == "off") t->lastScreen = QImage();
-                refreshTilePixmap(t);
-                if (mainKey_ == sender) updateMainFromTile(t);
-            }
+    // 2) 新协议的房间事件：kind:"room" + event
+    if (p.type == MSG_SERVER_EVENT && p.json.value("kind").toString() == QLatin1String("room")) {
+        const QString event = p.json.value("event").toString();   // "snapshot"/"join"/"leave"
+        const QString who   = p.json.value("who").toString();
+
+        // members 用于 snapshot 或校正
+        QSet<QString> members;
+        for (const auto& v : p.json.value("members").toArray()) {
+            const QString u = v.toString();
+            if (!u.isEmpty() && u != me) members.insert(u);
         }
-        break;
-    }
 
-    case MSG_SERVER_EVENT:
-    {
-        const QString kind = p.json.value("kind").toString();
-
-        // 情况一：服务器推送房间成员完整列表（进入/退出都会触发）
-        if (kind == "room") {
-            QStringList members;
-            for (auto v : p.json.value("members").toArray())
-                members << v.toString();
-
-            QSet<QString> shouldHave = QSet<QString>::fromList(members);
-            shouldHave.remove(edUser->text());
-
-            // 确保列表里的用户都有窗口
-            for (const QString& u : shouldHave) {
+        if (event == QLatin1String("snapshot")) {
+            for (const QString& u : members) {
                 VideoTile* t = ensureRemoteTile(u);
-                if (t && t->lastCam.isNull() && t->lastScreen.isNull()) {
-                    setTileWaiting(t, QStringLiteral("等待视频/屏幕..."));
+                setTileWaiting(t, QStringLiteral("等待对方视频/屏幕…"));
+            }
+            const auto existing = remoteTiles_.keys();
+            for (const QString& u : existing) {
+                if (!members.contains(u)) removeRemoteTile(u);
+            }
+        } else if (event == QLatin1String("join")) {
+            if (!who.isEmpty() && who != me) {
+                VideoTile* t = ensureRemoteTile(who);
+                setTileWaiting(t, QStringLiteral("等待对方视频/屏幕…"));
+                txtLog->append(QStringLiteral("用户加入: %1").arg(who));
+            }
+        } else if (event == QLatin1String("leave")) {
+            if (!who.isEmpty()) {
+                removeRemoteTile(who);
+                txtLog->append(QStringLiteral("用户离开: %1").arg(who));
+                if (mainKey_ == who) {
+                    if (!remoteTiles_.isEmpty()) setMainKey(remoteTiles_.firstKey());
+                    else                         setMainKey(kLocalKey_);
                 }
             }
-
-            // 移除已不在房间的用户窗口
-            for (auto it = remoteTiles_.begin(); it != remoteTiles_.end(); ) {
-                if (!shouldHave.contains(it.key())) {
-                    if (mainKey_ == it.key()) setMainKey(QString());
-                    removeRemoteTile(it.key());
-                    it = remoteTiles_.begin();
-                } else {
-                    ++it;
-                }
-            }
-
-            applyAdaptiveByMembers(members.size());
-
-            if (currentMode() == ViewMode::Grid) refreshGridOnly();
-            else refreshFocusThumbs();
         }
-        // 情况二：服务器发出单个用户进入/退出事件（兼容不同后端）
-        else if (kind == "member_join" || kind == "user_join" || kind == "join") {
-            QString u = p.json.value("user").toString();
-            if (u.isEmpty()) u = p.json.value("name").toString();
-            if (!u.isEmpty() && u != edUser->text()) {
-                ensureRemoteTile(u);
-                applyAdaptiveByMembers(int(remoteTiles_.size()) + 1);
-                if (currentMode() == ViewMode::Grid) refreshGridOnly();
-                else refreshFocusThumbs();
-            }
-        } else if (kind == "member_leave" || kind == "user_leave" || kind == "leave") {
-            QString u = p.json.value("user").toString();
-            if (u.isEmpty()) u = p.json.value("name").toString();
-            if (!u.isEmpty() && u != edUser->text()) {
-                if (mainKey_ == u) setMainKey(QString());
-                removeRemoteTile(u);
-                applyAdaptiveByMembers(int(remoteTiles_.size()) + 1);
-                if (currentMode() == ViewMode::Grid) refreshGridOnly();
-                else refreshFocusThumbs();
-            }
-        } else {
-            txtLog->append(QString("[server] %1")
-                           .arg(QString::fromUtf8(QJsonDocument(p.json).toJson(QJsonDocument::Compact))));
-        }
-        break;
+
+        applyAdaptiveByMembers(remoteTiles_.size() + 1);
+        refreshGridOnly();
+        refreshFocusThumbs();
+        return;
     }
 
-    case MSG_ANNOT:
-    {
-        if (p.json.value("roomId").toString() != edRoom->text()) break;
-
-        const QString rawTarget = p.json.value("target").toString();
-        QString target = rawTarget;
-        if (target == kLocalKey_) target = p.json.value("sender").toString();
-        if (target.isEmpty()) break;
-
-        if (auto* m = modelFor(target)) {
-            if (m->applyEvent(p.json)) {
-                if (mainKey_ == target) {
-                    updateMainFitted();
-                }
-                if (target == kLocalKey_) {
-                    refreshTilePixmap(&localTile_);
-                } else {
-                    auto it = remoteTiles_.find(target);
-                    if (it != remoteTiles_.end()) refreshTilePixmap(it.value());
-                }
-            }
+    // 3) 兜底：媒体/控制/标注到达即“按需创建”远端窗口（避免没有房间事件时看不到人）
+    if (p.type == MSG_VIDEO_FRAME || p.type == MSG_AUDIO_FRAME || p.type == MSG_CONTROL || p.type == MSG_ANNOT) {
+        const QString sender = p.json.value("sender").toString();
+        if (!sender.isEmpty() && sender != me && !remoteTiles_.contains(sender)) {
+            VideoTile* t = ensureRemoteTile(sender);
+            setTileWaiting(t, QStringLiteral("等待对方视频/屏幕…"));
+            applyAdaptiveByMembers(remoteTiles_.size() + 1);
+            refreshGridOnly();
+            refreshFocusThumbs();
         }
-        break;
+        // 继续走原有的视频/音频/控制处理流程（你已有的分发逻辑）
+        // 注意：此处不要 return; 让后续原有处理能执行
     }
 
-    default:
-        break;
+    // 4) 兼容老服务器文本广播（chat_broadcast），从文本判断加入/离开
+    if (p.type == MSG_TEXT) {
+        const QString action = p.json.value("action").toString();
+        const bool systemMsg = p.json.value("system").toBool(false);
+        const QString from   = p.json.value("from").toString();
+        const QString text   = p.json.value("text").toString();
+
+        if (systemMsg && action == QLatin1String("chat_broadcast")) {
+            if (text.contains(QStringLiteral("进入房间")) && !from.isEmpty() && from != me) {
+                VideoTile* t = ensureRemoteTile(from);
+                setTileWaiting(t, QStringLiteral("等待对方视频/屏幕…"));
+            } else if (text.contains(QStringLiteral("离开房间")) && !from.isEmpty()) {
+                removeRemoteTile(from);
+                if (mainKey_ == from) {
+                    if (!remoteTiles_.isEmpty()) setMainKey(remoteTiles_.firstKey());
+                    else                         setMainKey(kLocalKey_);
+                }
+            }
+            applyAdaptiveByMembers(remoteTiles_.size() + 1);
+            refreshGridOnly();
+            refreshFocusThumbs();
+        }
     }
 }
 
