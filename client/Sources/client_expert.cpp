@@ -38,6 +38,10 @@ static OrderInfo orderFromJson(const QJsonObject& o)
     return r;
 }
 
+const OrderInfo* ClientExpert::findOrder(int id) const {
+    for (const auto& od : orders) if (od.id == id) return &od; return nullptr;
+}
+
 ClientExpert::ClientExpert(QWidget *parent) :
     QWidget(parent),
     ui(new Ui::ClientExpert)
@@ -101,12 +105,10 @@ void ClientExpert::setJoinedOrder(bool joined) { joinedOrder = joined; updateTab
 
 void ClientExpert::updateTabEnabled()
 {
+    // 允许对任何选中行执行 接受/拒绝，从而实现多次修改
     bool hasSelection = ui->tableOrders->currentRow() >= 0;
-    QString status;
-    if (hasSelection) status = ui->tableOrders->item(ui->tableOrders->currentRow(), 3)->text();
-    const bool canAct = hasSelection && status == QStringLiteral("待处理");
-    ui->btnAccept->setEnabled(canAct);
-    ui->btnReject->setEnabled(canAct);
+    ui->btnAccept->setEnabled(hasSelection);
+    ui->btnReject->setEnabled(hasSelection);
 }
 
 void ClientExpert::refreshOrders()
@@ -146,24 +148,31 @@ void ClientExpert::refreshOrders()
         t->setItem(r,5,new QTableWidgetItem(od.accepter.isEmpty() ? "-" : od.accepter));
     }
 
-    // 是否存在“我已接受”的工单，用于后续权限控制
+    // 是否存在"我已接受"的工单，用于后续权限控制
     setJoinedOrder(hasMyAcceptedOrder());
+
+    // 刷新后恢复上次选择（便于连续处理多条）
+    restoreSelection();
 }
 
 void ClientExpert::sendUpdateOrder(int orderId, const QString& status)
 {
-    // 前端校验：仅“待处理”允许操作
-    for (const auto& od : orders) {
-        if (od.id == orderId && od.status != QStringLiteral("待处理")) {
-            QMessageBox::information(this, "提示", "该工单当前状态不允许操作");
-            return;
-        }
+    const OrderInfo* cur = findOrder(orderId);
+    if (!cur) return;
+
+    // 若已被他人接受，提示是否覆盖
+    if (!cur->accepter.isEmpty() && cur->accepter != UserSession::expertUsername) {
+        const QString msg = (status == QStringLiteral("已接受"))
+            ? QString("该工单已由 %1 接受，是否改为你接受？").arg(cur->accepter)
+            : QString("该工单已由 %1 接受，是否改为已拒绝？").arg(cur->accepter);
+        if (QMessageBox::question(this, "确认", msg) != QMessageBox::Yes) return;
     }
 
-    QJsonObject rep;
-    QString err;
+    QJsonObject rep; QString err;
     QJsonObject req{{"action","update_order"},{"id",orderId},{"status",status}};
     if (status == QStringLiteral("已接受")) req["accepter"] = UserSession::expertUsername;
+    else if (status == QStringLiteral("已拒绝")) req["accepter"] = ""; // 显式清空
+
     if (!sendRequest(req, rep, &err)) { QMessageBox::warning(this, "更新工单失败", err); return; }
     if (!rep.value("ok").toBool()) { QMessageBox::warning(this, "更新工单失败", rep.value("msg").toString("未知错误")); return; }
     refreshOrders();
@@ -174,6 +183,7 @@ void ClientExpert::on_btnAccept_clicked()
     int row = ui->tableOrders->currentRow();
     if (row < 0) { QMessageBox::information(this, "提示", "请选择一条工单"); return; }
     int id = ui->tableOrders->item(row,0)->data(Qt::UserRole).toInt();
+    lastSelectedOrderId_ = id;
     sendUpdateOrder(id, QStringLiteral("已接受"));
 }
 
@@ -182,12 +192,12 @@ void ClientExpert::on_btnReject_clicked()
     int row = ui->tableOrders->currentRow();
     if (row < 0) { QMessageBox::information(this, "提示", "请选择一条工单"); return; }
     int id = ui->tableOrders->item(row,0)->data(Qt::UserRole).toInt();
+    lastSelectedOrderId_ = id;
     sendUpdateOrder(id, QStringLiteral("已拒绝"));
 }
 
 void ClientExpert::on_tabChanged(int idx)
 {
-    // 假设第 0 页是“工单设置”，其它页需要“我已接受的工单”上下文
     if (idx != 0 && !joinedOrder) {
         QMessageBox::information(this, "提示", "当前没有待处理工单或你尚未加入任何工单");
         ui->tabWidget->setCurrentIndex(0);
@@ -237,6 +247,17 @@ bool ClientExpert::hasMyAcceptedOrder() const
             return true;
     }
     return false;
+}
+
+void ClientExpert::restoreSelection() {
+    if (lastSelectedOrderId_ <= 0) return;
+    auto* t = ui->tableOrders;
+    for (int r = 0; r < t->rowCount(); ++r) {
+        if (t->item(r,0)->data(Qt::UserRole).toInt() == lastSelectedOrderId_) {
+            t->setCurrentCell(r, 0);
+            break;
+        }
+    }
 }
 
 void ClientExpert::logoutToLogin()

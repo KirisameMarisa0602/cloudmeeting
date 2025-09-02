@@ -286,6 +286,11 @@ static QJsonObject handleUpdateOrder(const QJsonObject& req, QSqlDatabase& db)
         q.addBindValue(status);
         q.addBindValue(accepter);
         q.addBindValue(id);
+    } else if (status == QStringLiteral("已拒绝")) {
+        // When rejecting, always clear the accepter field regardless of the accepter value in request
+        q.prepare("UPDATE orders SET status=?, accepter='' WHERE id=?");
+        q.addBindValue(status);
+        q.addBindValue(id);
     } else {
         q.prepare("UPDATE orders SET status=? WHERE id=?");
         q.addBindValue(status);

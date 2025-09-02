@@ -35,6 +35,9 @@ private:
     bool joinedOrder = false;
     QLabel* labUserNameCorner_ = nullptr;
 
+    // Remember selection across refresh for multi-order editing
+    int lastSelectedOrderId_ = -1;
+
     void refreshOrders();
     void updateTabEnabled();
     void sendUpdateOrder(int orderId, const QString& status);
@@ -45,6 +48,8 @@ private:
     void logoutToLogin();
 
     bool hasMyAcceptedOrder() const;
+    const OrderInfo* findOrder(int id) const;
+    void restoreSelection();
 };
 
 #endif // CLIENT_EXPERT_H
