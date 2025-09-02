@@ -25,6 +25,9 @@ enum MsgType : quint16 {
     MSG_AUDIO_FRAME      = 40,  // 预留
     MSG_CONTROL          = 50,  // 控制/状态，如 {kind:"video", state:"on/off"}
 
+    MSG_PING             = 80,  // 心跳请求
+    MSG_PONG             = 81,  // 心跳响应
+
     MSG_SERVER_EVENT     = 90   // 服务器事件，如房间成员列表
 };
 

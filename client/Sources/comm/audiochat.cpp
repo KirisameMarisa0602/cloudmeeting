@@ -170,7 +170,9 @@ void AudioChat::onMicReadyRead() {
 void AudioChat::shrinkQueueIfNeeded(QByteArray& q) {
     const int maxBytes = kMaxQueueFrames * kPcmBytesPerFrm;
     if (q.size() > maxBytes) {
-        q.remove(0, q.size() - maxBytes);
+        // 更积极的队列管理：保留最新的帧，丢弃较老的
+        const int keepBytes = maxBytes * 3 / 4; // 保留75%，给新数据留空间
+        q.remove(0, q.size() - keepBytes);
     }
 }
 

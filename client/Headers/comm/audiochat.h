@@ -48,7 +48,7 @@ private:
     static constexpr int   kFrameSamples    = kSampleRate * kFrameMs / 1000;
     static constexpr int   kPcmBytesPerFrm  = kFrameSamples * 2;
     static constexpr int   kUlawBytesPerFrm = kFrameSamples;
-    static constexpr int   kMaxQueueFrames  = 50;
+    static constexpr int   kMaxQueueFrames  = 30;  // 减少到30帧(600ms)，更及时丢弃过期音频
 
     static quint8  linearToUlaw(qint16 pcm);
     static qint16  ulawToLinear(quint8 ul);
