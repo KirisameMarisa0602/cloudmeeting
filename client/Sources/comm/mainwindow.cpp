@@ -668,19 +668,22 @@ void MainWindow::onPkt(Packet p)
 
     // 1) 加入确认（带 code 和 roomId），设置身份
     if (p.type == MSG_SERVER_EVENT && p.json.contains("code")) {
-        const int code = p.json.value("code").toInt(-1);
-        if (code == 0 && p.json.contains("roomId")) {
-            const QString roomId = p.json.value("roomId").toString();
-            if (audio_) audio_->setIdentity(roomId, me);
-            if (share_) share_->setIdentity(roomId, me);
-            if (udp_)   udp_->setIdentity(roomId, me);
-            txtLog->append(QStringLiteral("加入房间成功: %1").arg(roomId));
-        } else if (code != 0) {
-            txtLog->append(QStringLiteral("加入失败: %1").arg(p.json.value("message").toString()));
-        }
-        return;
-    }
+            const int code = p.json.value("code").toInt(-1);
+            if (code == 0 && p.json.contains("roomId")) {
+                const QString roomId = p.json.value("roomId").toString();
+                if (audio_) audio_->setIdentity(roomId, me);
+                if (share_) share_->setIdentity(roomId, me);
+                if (udp_)   udp_->setIdentity(roomId, me);
 
+                // 不再直接调用 udp_->sendRegister()（其为私有）。
+                // setIdentity/ configureServer 会在就绪时自动注册。
+
+                txtLog->append(QStringLiteral("加入房间成功: %1").arg(roomId));
+            } else if (code != 0) {
+                txtLog->append(QStringLiteral("加入失败: %1").arg(p.json.value("message").toString()));
+            }
+            return;
+        }
     // 2) 新协议的房间事件：kind:"room" + event
     if (p.type == MSG_SERVER_EVENT && p.json.value("kind").toString() == QLatin1String("room")) {
         const QString event = p.json.value("event").toString();   // "snapshot"/"join"/"leave"

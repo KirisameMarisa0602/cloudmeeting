@@ -21,8 +21,15 @@ void UdpMediaClient::configureServer(const QString& host, quint16 port) {
 
 void UdpMediaClient::setIdentity(const QString& roomId, const QString& user) {
     roomId_ = roomId;
-    user_ = user;
-    if (serverPort_ != 0) sendRegister();
+    user_   = user;
+
+    // 当身份和服务器都就绪时自动注册
+    const bool identityReady = !roomId_.isEmpty() && !user_.isEmpty();
+    const bool serverReady   = (serverPort_ != 0) && !serverAddr_.isNull(); // 注意使用 serverAddr_
+    if (identityReady && serverReady) {
+        sendRegister();
+    }
+
     heartbeat_.start();
     cleanup_.start();
 }
