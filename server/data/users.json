@@ -1,0 +1,8 @@
+{
+    "testfactory": {
+        "created_at": "2025-09-02T07:11:31",
+        "password_hash": "21785625154545f09c76ac303f20bf84e45616acd06b2eaa5cd07d42d85f936c",
+        "role": "factory",
+        "salt": "72c43a27-245c-4aa1-b940-8c5a0642ad24"
+    }
+}
