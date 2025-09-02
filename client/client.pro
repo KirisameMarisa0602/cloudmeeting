@@ -20,3 +20,6 @@ SOURCES   = $$unique(SOURCES)
 FORMS     = $$unique(FORMS)
 
 QMAKE_CXXFLAGS += -Wall
+
+# Link SDK and commonlib
+include(../sdk_link.pri)

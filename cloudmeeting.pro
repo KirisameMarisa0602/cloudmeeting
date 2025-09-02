@@ -1,3 +1,13 @@
 TEMPLATE = subdirs
 CONFIG  += ordered
-SUBDIRS += server client
+
+SUBDIRS += \
+    commonlib \
+    sdk \
+    server \
+    client
+
+# Build order: libs first
+sdk.depends = commonlib
+server.depends = commonlib
+client.depends = commonlib sdk
