@@ -164,13 +164,20 @@ void ClientExpert::refreshOrders()
     setJoinedOrder(hasMyAcceptedOrder());
 }
 
-// 替换整段函数实现
+// 替换整个函数：删除“该工单当前状态不允许操作”的前端校验与提示
 void ClientExpert::sendUpdateOrder(int orderId, const QString& status)
 {
     QJsonObject rep;
     QString err;
-    QJsonObject req{{"action","update_order"},{"id",orderId},{"status",status}};
-    if (status == QStringLiteral("已接受")) req["accepter"] = UserSession::expertUsername;
+
+    QJsonObject req{
+        {"action","update_order"},
+        {"id", orderId},
+        {"status", status}
+    };
+    if (status == QStringLiteral("已接受")) {
+        req["accepter"] = UserSession::expertUsername;
+    }
 
     if (!sendRequest(req, rep, &err)) {
         QMessageBox::warning(this, "更新工单失败", err);
